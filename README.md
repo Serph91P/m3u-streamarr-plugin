@@ -108,9 +108,6 @@ Configure base numbers in the Monitored Channels setting: `username=BaseNumber`
 
 ## Troubleshooting
 
-### "streamlink binary not found"
-Ensure streamlink is installed in the m3u-proxy environment. In Docker, it should be included in the image.
-
 ### "Failed to obtain Twitch API access token"
 - Verify your Client ID and Client Secret are correct
 - Check that the Twitch application hasn't been revoked at https://dev.twitch.tv/console/apps

@@ -36,7 +36,7 @@
       "type": "textarea",
       "default": "",
       "required": false,
-      "helper_text": "One Twitch username per line. Format: username or username=BaseNumber (for decimal numbering). Lines starting with # are ignored.\n\nExamples:\nnightbot\npokimane=50\nmontanablack88=60\n\n⚠ Without Twitch API credentials, each channel is checked individually via streamlink. This is slow for more than ~20 channels — consider adding API credentials."
+      "helper_text": "One Twitch username per line. Format: username or username=BaseNumber (for decimal numbering). Lines starting with # are ignored.\n\nExamples:\nnightbot\npokimane=50\nmontanablack88=60\n\n⚠ Without Twitch API credentials, each channel is checked individually via streamlink. This is slow for more than ~20 channels - consider adding API credentials."
     },
     {
       "id": "stream_profile_id",
@@ -115,7 +115,7 @@
       "label": "Include VODs",
       "type": "boolean",
       "default": false,
-      "helper_text": "Also create channels for recent VODs of monitored channels. Requires Twitch API credentials — VOD discovery is not available via streamlink fallback."
+      "helper_text": "Also create channels for recent VODs of monitored channels. Requires Twitch API credentials - VOD discovery is not available via streamlink fallback."
     },
     {
       "id": "vod_limit",
@@ -162,7 +162,7 @@
       "type": "text",
       "default": "",
       "required": false,
-      "helper_text": "Twitch API Client ID for fast batch detection. Get one at https://dev.twitch.tv/console/apps — create an application and copy the Client ID. Leave empty to use streamlink fallback."
+      "helper_text": "Twitch API Client ID for fast batch detection. Get one at https://dev.twitch.tv/console/apps - create an application and copy the Client ID. Leave empty to use streamlink fallback."
     },
     {
       "id": "twitch_client_secret",

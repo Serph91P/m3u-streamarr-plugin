@@ -96,7 +96,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $logins = array_column($channelEntries, 'login');
 
         if (! $useApi && count($logins) > 20) {
-            $context->warning('Checking '.count($logins).' channels without Twitch API credentials — this will be slow. Consider adding API credentials for batch detection.');
+            $context->warning('Checking '.count($logins).' channels without Twitch API credentials - this will be slow. Consider adding API credentials for batch detection.');
         }
 
         $added = 0;
@@ -163,7 +163,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 ->first();
 
             if ($existing) {
-                if ($this->updateExistingChannel($existing, $stream, $settings, $userId)) {
+                if ($this->updateExistingChannel($existing, $stream, $settings, $userId, $userProfiles)) {
                     $context->info("{$login}: updated title/game for channel #{$existing->channel}");
                     $updated++;
                 } else {
@@ -182,7 +182,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 'login' => $login,
                 'display_name' => $stream['display_name'] ?? $login,
                 'user_id' => $stream['user_id'] ?? ($userProfiles[$login]['user_id'] ?? ''),
-                'title' => $stream['title'] ?? "{$login} — Live",
+                'title' => $stream['title'] ?? "{$login} - Live",
                 'game' => $stream['game'] ?? '',
                 'game_box_art' => $stream['game_box_art'] ?? '',
                 'logo' => $logo,
@@ -191,10 +191,10 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
             try {
                 $this->createChannel($metadata, self::STREAM_TYPE_LIVE, $settings, $userId, $channelNumber);
-                $context->info("{$login}: added live channel #{$channelNumber} — '{$metadata['title']}'");
+                $context->info("{$login}: added live channel #{$channelNumber} - '{$metadata['title']}'");
                 $added++;
             } catch (\Throwable $e) {
-                $context->error("{$login}: failed to create channel — {$e->getMessage()}");
+                $context->error("{$login}: failed to create channel - {$e->getMessage()}");
                 $errors[] = "{$login}: {$e->getMessage()}";
             }
         }
@@ -236,7 +236,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                         'login' => strtolower($login),
                         'display_name' => $userProfiles[strtolower($login)]['display_name'] ?? $login,
                         'user_id' => $twitchUserId,
-                        'title' => $vod['title'] ?? "{$login} — VOD",
+                        'title' => $vod['title'] ?? "{$login} - VOD",
                         'game' => '',
                         'game_box_art' => '',
                         'logo' => $logo,
@@ -249,13 +249,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                         $context->info("{$login}: added VOD #{$vodId} as channel #{$channelNumber}");
                         $added++;
                     } catch (\Throwable $e) {
-                        $context->error("{$login}: failed to create VOD channel — {$e->getMessage()}");
+                        $context->error("{$login}: failed to create VOD channel - {$e->getMessage()}");
                         $errors[] = "{$login} VOD: {$e->getMessage()}";
                     }
                 }
             }
         } elseif (($settings['include_vods'] ?? false) && ! $useApi) {
-            $context->warning('VOD discovery requires Twitch API credentials — skipping VODs.');
+            $context->warning('VOD discovery requires Twitch API credentials - skipping VODs.');
         }
 
         // --- Cleanup ---
@@ -382,7 +382,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                     'login' => $login,
                     'display_name' => $streamInfo['display_name'] ?? $login,
                     'user_id' => $streamInfo['user_id'] ?? ($userProfile['user_id'] ?? ''),
-                    'title' => $streamInfo['title'] ?? "{$login} — Live",
+                    'title' => $streamInfo['title'] ?? "{$login} - Live",
                     'game' => $streamInfo['game'] ?? '',
                     'game_box_art' => $streamInfo['game_box_art'] ?? '',
                     'logo' => $streamInfo['profile_image'] ?? ($userProfile['profile_image'] ?? ''),
@@ -500,7 +500,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $context->info("Deleted {$count} channel(s) created by Streamarr.");
 
-        return PluginActionResult::success("Reset complete — deleted {$count} channel(s).", ['deleted' => $count]);
+        return PluginActionResult::success("Reset complete - deleted {$count} channel(s).", ['deleted' => $count]);
     }
 
     // -------------------------------------------------------------------------
@@ -603,7 +603,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      * Update an existing live channel with fresh stream data (title, game, group).
      * Returns true if any field was actually changed.
      */
-    private function updateExistingChannel(Channel $channel, array $stream, array $settings, int $userId): bool
+    private function updateExistingChannel(Channel $channel, array $stream, array $settings, int $userId, array $userProfiles = []): bool
     {
         $changed = false;
         $info = $channel->info ?? [];
@@ -622,7 +622,8 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             $changed = true;
         }
 
-        $newLogo = $stream['profile_image'] ?? '';
+        $login = strtolower($stream['login'] ?? '');
+        $newLogo = $stream['profile_image'] ?: ($userProfiles[$login]['profile_image'] ?? '');
         if ($newLogo && $newLogo !== $channel->logo_internal) {
             $channel->logo_internal = $newLogo;
             $changed = true;
@@ -693,7 +694,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $cleaned = 0;
 
         if ($useApi) {
-            // Batch check — very efficient
+            // Batch check - very efficient
             $logins = $channels->map(fn (Channel $ch) => data_get($ch->info, 'twitch_login'))->filter()->unique()->values()->all();
             $liveStreams = $this->batchGetStreams($settings, $logins);
             $liveLogins = collect($liveStreams)->pluck('login')->map(fn ($l) => strtolower($l))->all();
@@ -702,7 +703,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 $login = strtolower(data_get($channel->info, 'twitch_login', ''));
 
                 if (! in_array($login, $liveLogins, true)) {
-                    $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') — removing.");
+                    $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') - removing.");
                     $channel->delete();
                     $cleaned++;
                 }
@@ -710,7 +711,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         } else {
             $streamlink = $this->findStreamlink();
             if (! $streamlink) {
-                $context->warning('Cannot check stream status — streamlink not found.');
+                $context->warning('Cannot check stream status - streamlink not found.');
 
                 return 0;
             }
@@ -724,7 +725,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 $streamInfo = $this->checkChannelLiveViaStreamlink($streamlink, $login, $cookiesFile);
 
                 if (! $streamInfo) {
-                    $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') — removing.");
+                    $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') - removing.");
                     $channel->delete();
                     $cleaned++;
                 }
@@ -974,7 +975,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'login' => strtolower($login),
             'display_name' => $metadata['author'] ?? $login,
             'user_id' => '',
-            'title' => $metadata['title'] ?? "{$login} — Live",
+            'title' => $metadata['title'] ?? "{$login} - Live",
             'game' => $metadata['category'] ?? '',
             'game_box_art' => '',
             'thumbnail' => '',

@@ -17,7 +17,6 @@ Monitor Twitch channels for live streams and VODs, automatically create and remo
 
 - **m3u-editor** with the plugin system enabled
 - **m3u-proxy** with streamlink support (`STREAMLINK_ENABLED=true`)
-- **streamlink** installed in the m3u-proxy container/environment
 - **Twitch API credentials** (optional but recommended) — see [Setup](#twitch-api-setup)
 
 ## Installation

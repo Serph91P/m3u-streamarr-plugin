@@ -253,6 +253,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                         'logo' => $logo,
                         'thumbnail' => $vod['thumbnail'] ?? '',
                         'vod_id' => $vodId,
+                        'vod_data' => $vod,
                     ];
 
                     try {
@@ -428,17 +429,43 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                     continue;
                 }
 
-                $channelNumber = $this->nextChannelNumber($userId, $settings, 'vod', null);
+                // Fetch VOD details from API if available
+                $vodData = [];
+                $vodTitle = "Twitch VOD #{$vodId}";
+                $vodLogin = 'vod';
+                $vodDisplayName = 'VOD';
+                $vodUserId = '';
+                $vodLogo = '';
+                $vodThumbnail = '';
+
+                if ($useApi && $this->accessToken) {
+                    $vodInfo = $this->getVideoById($settings, $vodId);
+
+                    if ($vodInfo) {
+                        $vodData = $vodInfo;
+                        $vodTitle = $vodInfo['title'] ?? $vodTitle;
+                        $vodLogin = strtolower($vodInfo['user_login'] ?? 'vod');
+                        $vodDisplayName = $vodInfo['user_name'] ?? $vodLogin;
+                        $vodUserId = $vodInfo['user_id'] ?? '';
+                        $vodThumbnail = $vodInfo['thumbnail'] ?? '';
+
+                        $profiles = $this->batchGetUsers($settings, [$vodLogin]);
+                        $vodLogo = $profiles[$vodLogin]['profile_image'] ?? '';
+                    }
+                }
+
+                $channelNumber = $this->nextChannelNumber($userId, $settings, $vodLogin, null);
                 $metadata = [
-                    'login' => 'vod',
-                    'display_name' => 'VOD',
-                    'user_id' => '',
-                    'title' => "Twitch VOD #{$vodId}",
+                    'login' => $vodLogin,
+                    'display_name' => $vodDisplayName,
+                    'user_id' => $vodUserId,
+                    'title' => $vodTitle,
                     'game' => '',
                     'game_box_art' => '',
-                    'logo' => '',
-                    'thumbnail' => '',
+                    'logo' => $vodLogo,
+                    'thumbnail' => $vodThumbnail,
                     'vod_id' => $vodId,
+                    'vod_data' => $vodData,
                 ];
 
                 try {
@@ -524,7 +551,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     // -------------------------------------------------------------------------
 
     /**
-     * @param  array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, logo: string, thumbnail: string, vod_id?: string}  $metadata
+     * @param  array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, logo: string, thumbnail: string, vod_id?: string, vod_data?: array}  $metadata
      */
     private function createChannel(
         array $metadata,
@@ -536,6 +563,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $login = $metadata['login'];
         $isVod = $streamType === self::STREAM_TYPE_VOD;
         $vodId = $metadata['vod_id'] ?? null;
+        $vodData = $metadata['vod_data'] ?? [];
 
         $url = $isVod && $vodId
             ? "https://www.twitch.tv/videos/{$vodId}"
@@ -584,6 +612,60 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             $info['twitch_game_box_art'] = $metadata['game_box_art'];
         }
 
+        // Xtream-compatible VOD metadata
+        if ($isVod && ! empty($vodData)) {
+            $info['description'] = $vodData['description'] ?? '';
+            $info['plot'] = $vodData['description'] ?? '';
+            $info['duration'] = $vodData['duration_formatted'] ?? '';
+            $info['duration_secs'] = $vodData['duration_secs'] ?? 0;
+            $info['episode_run_time'] = $vodData['episode_run_time'] ?? 0;
+            $info['release_date'] = $vodData['published_at'] ?? '';
+            $info['releasedate'] = substr($vodData['published_at'] ?? '', 0, 10);
+            $info['cover_big'] = $metadata['thumbnail'] ?? '';
+            $info['movie_image'] = $metadata['logo'] ?? '';
+            $info['cast'] = $metadata['display_name'] ?? $login;
+            $info['genre'] = 'Twitch VOD';
+            $info['language'] = $vodData['language'] ?? '';
+            $info['twitch_view_count'] = $vodData['view_count'] ?? 0;
+            $info['twitch_vod_type'] = $vodData['vod_type'] ?? 'archive';
+            $info['twitch_stream_id'] = $vodData['stream_id'] ?? '';
+            $info['twitch_duration_raw'] = $vodData['duration_raw'] ?? '';
+            $info['twitch_created_at'] = $vodData['created_at'] ?? '';
+            $info['twitch_published_at'] = $vodData['published_at'] ?? '';
+
+            if (! empty($vodData['muted_segments'])) {
+                $info['twitch_muted_segments'] = $vodData['muted_segments'];
+            }
+        }
+
+        // Extract year from VOD created_at or published_at
+        $year = null;
+        if ($isVod && ! empty($vodData['created_at'])) {
+            $year = substr($vodData['created_at'], 0, 4);
+        }
+
+        // Build Xtream movie_data for VODs
+        $movieData = null;
+        if ($isVod) {
+            $addedTimestamp = '';
+            if (! empty($vodData['created_at'])) {
+                $addedTimestamp = (string) strtotime($vodData['created_at']);
+            }
+
+            $movieData = [
+                'stream_id' => 0,
+                'name' => $metadata['title'],
+                'title' => $metadata['title'],
+                'year' => $year ?? '',
+                'added' => $addedTimestamp ?: (string) time(),
+                'category_id' => (string) ($group?->id ?? ''),
+                'category_ids' => $group ? [$group->id] : [],
+                'container_extension' => 'ts',
+                'custom_sid' => '',
+                'direct_source' => '',
+            ];
+        }
+
         $channel = Channel::create([
             'uuid' => Str::orderedUuid()->toString(),
             'title' => $metadata['title'],
@@ -603,7 +685,16 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylist?->id,
             'info' => $info,
+            'container_extension' => $isVod ? 'ts' : null,
+            'year' => $year,
+            'movie_data' => $movieData,
         ]);
+
+        // Update movie_data.stream_id with actual channel ID
+        if ($isVod && $movieData) {
+            $movieData['stream_id'] = $channel->id;
+            $channel->update(['movie_data' => $movieData]);
+        }
 
         if ($customPlaylist) {
             $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
@@ -923,7 +1014,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     /**
      * Fetch recent VODs for a Twitch user via Helix API.
      *
-     * @return list<array{id: string, title: string, thumbnail: string, duration: string}>
+     * @return list<array{id: string, stream_id: string, title: string, description: string, created_at: string, published_at: string, url: string, thumbnail: string, view_count: int, language: string, vod_type: string, duration_raw: string, duration_secs: int, duration_formatted: string, episode_run_time: int, muted_segments: list<array{duration: int, offset: int}>}>
      */
     private function getChannelVideos(array $settings, string $twitchUserId, int $limit): array
     {
@@ -944,16 +1035,87 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         foreach ($response->json('data', []) as $video) {
             $thumbnail = str_replace(['%{width}', '%{height}'], ['640', '360'], $video['thumbnail_url'] ?? '');
+            $durationRaw = $video['duration'] ?? '';
+            $durationSecs = $this->parseTwitchDuration($durationRaw);
 
             $results[] = [
                 'id' => (string) ($video['id'] ?? ''),
+                'stream_id' => (string) ($video['stream_id'] ?? ''),
                 'title' => $video['title'] ?? 'Untitled VOD',
+                'description' => $video['description'] ?? '',
+                'created_at' => $video['created_at'] ?? '',
+                'published_at' => $video['published_at'] ?? '',
+                'url' => $video['url'] ?? '',
                 'thumbnail' => $thumbnail,
-                'duration' => $video['duration'] ?? '',
+                'view_count' => (int) ($video['view_count'] ?? 0),
+                'language' => $video['language'] ?? '',
+                'vod_type' => $video['type'] ?? 'archive',
+                'duration_raw' => $durationRaw,
+                'duration_secs' => $durationSecs,
+                'duration_formatted' => sprintf('%02d:%02d:%02d', intdiv($durationSecs, 3600), intdiv($durationSecs % 3600, 60), $durationSecs % 60),
+                'episode_run_time' => (int) ceil($durationSecs / 60),
+                'muted_segments' => array_map(
+                    fn (array $seg) => ['duration' => (int) ($seg['duration'] ?? 0), 'offset' => (int) ($seg['offset'] ?? 0)],
+                    $video['muted_segments'] ?? [],
+                ),
             ];
         }
 
         return $results;
+    }
+
+    /**
+     * Fetch a single video by ID from Twitch Helix API.
+     * Used when manually adding a VOD URL to get full metadata.
+     *
+     * @return array{id: string, stream_id: string, user_id: string, user_login: string, user_name: string, title: string, description: string, created_at: string, published_at: string, url: string, thumbnail: string, view_count: int, language: string, vod_type: string, duration_raw: string, duration_secs: int, duration_formatted: string, episode_run_time: int, muted_segments: list<array{duration: int, offset: int}>}|null
+     */
+    private function getVideoById(array $settings, string $videoId): ?array
+    {
+        $response = Http::withHeaders([
+            'Client-ID' => $settings['twitch_client_id'],
+            'Authorization' => "Bearer {$this->accessToken}",
+        ])->get('https://api.twitch.tv/helix/videos', [
+            'id' => $videoId,
+        ]);
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        $video = $response->json('data.0');
+        if (! $video) {
+            return null;
+        }
+
+        $thumbnail = str_replace(['%{width}', '%{height}'], ['640', '360'], $video['thumbnail_url'] ?? '');
+        $durationRaw = $video['duration'] ?? '';
+        $durationSecs = $this->parseTwitchDuration($durationRaw);
+
+        return [
+            'id' => (string) ($video['id'] ?? ''),
+            'stream_id' => (string) ($video['stream_id'] ?? ''),
+            'user_id' => (string) ($video['user_id'] ?? ''),
+            'user_login' => strtolower($video['user_login'] ?? ''),
+            'user_name' => $video['user_name'] ?? '',
+            'title' => $video['title'] ?? 'Untitled VOD',
+            'description' => $video['description'] ?? '',
+            'created_at' => $video['created_at'] ?? '',
+            'published_at' => $video['published_at'] ?? '',
+            'url' => $video['url'] ?? '',
+            'thumbnail' => $thumbnail,
+            'view_count' => (int) ($video['view_count'] ?? 0),
+            'language' => $video['language'] ?? '',
+            'vod_type' => $video['type'] ?? 'archive',
+            'duration_raw' => $durationRaw,
+            'duration_secs' => $durationSecs,
+            'duration_formatted' => sprintf('%02d:%02d:%02d', intdiv($durationSecs, 3600), intdiv($durationSecs % 3600, 60), $durationSecs % 60),
+            'episode_run_time' => (int) ceil($durationSecs / 60),
+            'muted_segments' => array_map(
+                fn (array $seg) => ['duration' => (int) ($seg['duration'] ?? 0), 'offset' => (int) ($seg['offset'] ?? 0)],
+                $video['muted_segments'] ?? [],
+            ),
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -1026,6 +1188,28 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Parse Twitch ISO 8601 duration (e.g. "3h24m10s") into total seconds.
+     */
+    private function parseTwitchDuration(string $duration): int
+    {
+        $seconds = 0;
+
+        if (preg_match('/(\d+)h/', $duration, $m)) {
+            $seconds += (int) $m[1] * 3600;
+        }
+
+        if (preg_match('/(\d+)m/', $duration, $m)) {
+            $seconds += (int) $m[1] * 60;
+        }
+
+        if (preg_match('/(\d+)s/', $duration, $m)) {
+            $seconds += (int) $m[1];
+        }
+
+        return $seconds;
+    }
 
     /**
      * Fetch a Twitch user's profile image URL by parsing the channel page HTML.

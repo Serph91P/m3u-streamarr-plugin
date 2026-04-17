@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch channels for livestreams & VODs, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback.",

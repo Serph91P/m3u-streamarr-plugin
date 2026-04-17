@@ -4,22 +4,28 @@ namespace AppLocalPlugins\Streamarr;
 
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
+use App\Enums\EpgSourceType;
+use App\Models\Epg;
+use App\Models\EpgChannel;
 use App\Models\Group;
 use App\Models\StreamProfile;
 use App\Plugins\Contracts\ChannelProcessorPluginInterface;
+use App\Plugins\Contracts\EpgProcessorPluginInterface;
 use App\Plugins\Contracts\PluginInterface;
 use App\Plugins\Contracts\ScheduledPluginInterface;
 use App\Plugins\Support\PluginActionResult;
 use App\Plugins\Support\PluginExecutionContext;
+use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use Cron\CronExpression;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Spatie\Tags\Tag;
 
-class Plugin implements ChannelProcessorPluginInterface, PluginInterface, ScheduledPluginInterface
+class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInterface, PluginInterface, ScheduledPluginInterface
 {
     private const PLUGIN_MARKER = 'streamarr';
 
@@ -29,6 +35,12 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
     /** @var string|null Cached Twitch App Access Token for current action run */
     private ?string $accessToken = null;
+
+    /** @var Epg|null Cached EPG source for current action run */
+    private ?Epg $epgSource = null;
+
+    /** @var string EPG mode for current action run: 'game' or 'title' */
+    private string $epgMode = 'game';
 
     // -------------------------------------------------------------------------
     // PluginInterface
@@ -86,6 +98,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             return PluginActionResult::failure('Could not determine user ID. Ensure a Stream Profile is configured.');
         }
 
+        $this->epgMode = $settings['epg_mode'] ?? 'game';
         $channelEntries = $this->parseMonitoredChannels($settings['monitored_channels'] ?? '');
 
         if (empty($channelEntries)) {
@@ -163,6 +176,9 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $context->heartbeat('Processing live streams…', progress: 70);
 
+        // --- Ensure EPG source for programme guide ---
+        $this->ensureEpgSource($userId);
+
         // --- Process live streams ---
         foreach ($liveStreams as $stream) {
             $login = strtolower($stream['login']);
@@ -174,6 +190,17 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 ->first();
 
             if ($existing) {
+                // Ensure EPG channel is linked for programme guide
+                if (! $existing->epg_channel_id && $this->epgSource) {
+                    $logo = $stream['profile_image'] ?: ($userProfiles[$login]['profile_image'] ?? '');
+                    $epgChannel = $this->ensureEpgChannel($this->epgSource, $userId, $login, [
+                        'display_name' => $stream['display_name'] ?? $login,
+                        'logo' => $logo,
+                        'language' => $stream['language'] ?? '',
+                    ]);
+                    $existing->update(['epg_channel_id' => $epgChannel->id]);
+                }
+
                 if ($this->updateExistingChannel($existing, $stream, $settings, $userId, $userProfiles)) {
                     $context->info("{$login}: updated title/game for channel #{$existing->channel}");
                     $updated++;
@@ -198,7 +225,14 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 'game_box_art' => $stream['game_box_art'] ?? '',
                 'logo' => $logo,
                 'thumbnail' => $stream['thumbnail'] ?? '',
+                'language' => $stream['language'] ?? '',
             ];
+
+            // Create EPG channel for programme guide
+            if ($this->epgSource) {
+                $epgChannel = $this->ensureEpgChannel($this->epgSource, $userId, $login, $metadata);
+                $metadata['epg_channel_id'] = $epgChannel->id;
+            }
 
             try {
                 $this->createChannel($metadata, self::STREAM_TYPE_LIVE, $settings, $userId, $channelNumber);
@@ -279,6 +313,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $this->cleanupCookiesFile($cookiesFile);
         $this->accessToken = null;
 
+        // Write EPG programme data for all live channels
+        if ($this->epgSource) {
+            $this->writeEpgData($userId);
+        }
+        $this->epgSource = null;
+        $this->epgMode = 'game';
+
         $context->heartbeat('Done', progress: 100);
 
         $parts = [];
@@ -314,6 +355,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     private function handleAddManual(array $payload, PluginExecutionContext $context): PluginActionResult
     {
         $settings = $context->settings;
+        $this->epgMode = $settings['epg_mode'] ?? 'game';
         ['userId' => $userId, 'profile' => $profile] = $this->resolveContext($context);
 
         if (! $userId) {
@@ -404,7 +446,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                     'game_box_art' => $streamInfo['game_box_art'] ?? '',
                     'logo' => $streamInfo['profile_image'] ?? ($userProfile['profile_image'] ?? ''),
                     'thumbnail' => $streamInfo['thumbnail'] ?? '',
+                    'language' => $streamInfo['language'] ?? '',
                 ];
+
+                // Create EPG channel for programme guide
+                $epg = $this->ensureEpgSource($userId);
+                $epgChannel = $this->ensureEpgChannel($epg, $userId, $login, $metadata);
+                $metadata['epg_channel_id'] = $epgChannel->id;
 
                 try {
                     $this->createChannel($metadata, self::STREAM_TYPE_LIVE, $settings, $userId, $channelNumber);
@@ -482,6 +530,12 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $this->cleanupCookiesFile($cookiesFile);
         $this->accessToken = null;
 
+        // Write EPG programme data
+        if ($this->epgSource) {
+            $this->writeEpgData($userId);
+            $this->epgSource = null;
+        }
+
         $parts = [];
         if ($added) {
             $parts[] = "{$added} channel(s) added";
@@ -506,6 +560,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     private function handleCleanup(PluginExecutionContext $context): PluginActionResult
     {
         $settings = $context->settings;
+        $this->epgMode = $settings['epg_mode'] ?? 'game';
         ['userId' => $userId, 'profile' => $profile] = $this->resolveContext($context);
 
         if (! $userId) {
@@ -522,6 +577,10 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $this->cleanupCookiesFile($cookiesFile);
         $this->accessToken = null;
+
+        // Rewrite EPG data after removing ended streams
+        $this->writeEpgData($userId);
+        $this->epgSource = null;
 
         return PluginActionResult::success("Removed {$cleaned} ended channel(s).", ['cleaned' => $cleaned]);
     }
@@ -541,6 +600,23 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $count = $channels->count();
         $channels->each(fn (Channel $channel) => $channel->delete());
 
+        // Clean up EPG data
+        $epg = Epg::where('name', 'Streamarr')
+            ->where('user_id', $userId)
+            ->where('source_type', EpgSourceType::URL)
+            ->first();
+
+        if ($epg) {
+            Storage::disk('local')->deleteDirectory("epg-cache/{$epg->uuid}");
+            EpgChannel::where('epg_id', $epg->id)->where('user_id', $userId)->delete();
+            $epg->update([
+                'is_cached' => false,
+                'cache_meta' => null,
+                'channel_count' => 0,
+                'programme_count' => 0,
+            ]);
+        }
+
         $context->info("Deleted {$count} channel(s) created by Streamarr.");
 
         return PluginActionResult::success("Reset complete - deleted {$count} channel(s).", ['deleted' => $count]);
@@ -551,7 +627,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     // -------------------------------------------------------------------------
 
     /**
-     * @param  array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, logo: string, thumbnail: string, vod_id?: string, vod_data?: array}  $metadata
+     * @param  array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, logo: string, thumbnail: string, language?: string, vod_id?: string, vod_data?: array}  $metadata
      */
     private function createChannel(
         array $metadata,
@@ -599,6 +675,15 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'twitch_display_name' => $metadata['display_name'] ?? $login,
             'twitch_stream_type' => $streamType,
         ];
+
+        // Initialize EPG history for live channels
+        if (! $isVod) {
+            $info['twitch_epg_history'] = [[
+                'game' => $metadata['game'] ?? '',
+                'game_box_art' => $metadata['game_box_art'] ?? '',
+                'started_at' => Carbon::now()->toISOString(),
+            ]];
+        }
 
         if ($vodId) {
             $info['twitch_vod_id'] = $vodId;
@@ -668,10 +753,14 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $channel = Channel::create([
             'uuid' => Str::orderedUuid()->toString(),
+            'name' => $metadata['display_name'] ?? $login,
             'title' => $metadata['title'],
             'url' => $url,
             'channel' => (int) $channelNumber,
             'sort' => (float) $channelNumber,
+            'stream_id' => 'streamarr-'.$login,
+            'epg_channel_id' => $metadata['epg_channel_id'] ?? null,
+            'lang' => $metadata['language'] ?? '',
             'is_custom' => true,
             'is_vod' => $isVod,
             'enabled' => true,
@@ -723,9 +812,34 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $newGame = $stream['game'] ?? '';
         $oldGame = $info['twitch_game'] ?? '';
+
+        // Initialize EPG history if missing (for channels created before EPG support)
+        if (! isset($info['twitch_epg_history'])) {
+            $info['twitch_epg_history'] = [[
+                'game' => $oldGame,
+                'game_box_art' => $info['twitch_game_box_art'] ?? '',
+                'started_at' => Carbon::now()->toISOString(),
+            ]];
+            $changed = true;
+        }
+
         if ($newGame !== $oldGame) {
             $info['twitch_game'] = $newGame;
             $info['twitch_game_box_art'] = $stream['game_box_art'] ?? '';
+
+            // Append game change to EPG history
+            $history = $info['twitch_epg_history'] ?? [];
+            $history[] = [
+                'game' => $newGame,
+                'game_box_art' => $stream['game_box_art'] ?? '',
+                'started_at' => Carbon::now()->toISOString(),
+            ];
+
+            if (count($history) > 50) {
+                $history = array_slice($history, -50);
+            }
+
+            $info['twitch_epg_history'] = $history;
             $changed = true;
         }
 
@@ -733,6 +847,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $newLogo = $stream['profile_image'] ?: ($userProfiles[$login]['profile_image'] ?? '');
         if ($newLogo && $newLogo !== $channel->logo_internal) {
             $channel->logo_internal = $newLogo;
+            $changed = true;
+        }
+
+        // Update language if available
+        $newLang = $stream['language'] ?? '';
+        if ($newLang !== '' && $newLang !== ($channel->lang ?? '')) {
+            $channel->lang = $newLang;
             $changed = true;
         }
 
@@ -963,7 +1084,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      * Returns flat list of live stream data.
      *
      * @param  list<string>  $logins
-     * @return list<array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string}>
+     * @return list<array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string, language: string}>
      */
     private function batchGetStreams(array $settings, array $logins): array
     {
@@ -1004,6 +1125,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                     'game_box_art' => $gameBoxArt,
                     'thumbnail' => $thumbnail,
                     'profile_image' => '',
+                    'language' => $stream['language'] ?? '',
                 ];
             }
         }
@@ -1125,7 +1247,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     /**
      * Check if a Twitch channel is live using streamlink --json.
      *
-     * @return array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string}|null
+     * @return array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string, language: string}|null
      */
     private function checkChannelLiveViaStreamlink(string $binary, string $login, ?string $cookiesFile): ?array
     {
@@ -1164,6 +1286,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'game_box_art' => '',
             'thumbnail' => '',
             'profile_image' => '',
+            'language' => '',
         ];
     }
 
@@ -1397,5 +1520,267 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'stdout' => $result->output(),
             'stderr' => $result->errorOutput(),
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // EPG (Electronic Programme Guide)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Ensure a "Streamarr" EPG source exists for the given user.
+     * Caches the result for the duration of the current action run.
+     */
+    private function ensureEpgSource(int $userId): Epg
+    {
+        if ($this->epgSource) {
+            return $this->epgSource;
+        }
+
+        $this->epgSource = Epg::firstOrCreate(
+            ['name' => 'Streamarr', 'user_id' => $userId, 'source_type' => EpgSourceType::URL],
+            [
+                'url' => null,
+                'auto_sync' => false,
+                'synced' => now(),
+                'status' => Status::Completed,
+                'processing' => false,
+                'processing_phase' => null,
+                'is_cached' => true,
+                'cache_progress' => 100,
+            ],
+        );
+
+        // Heal existing records: fix stuck sync state, ensure cache-only mode
+        if (! $this->epgSource->synced || $this->epgSource->auto_sync || $this->epgSource->processing) {
+            $this->epgSource->update([
+                'auto_sync' => false,
+                'synced' => now(),
+                'status' => Status::Completed,
+                'processing' => false,
+                'processing_phase' => null,
+                'is_cached' => true,
+                'cache_progress' => 100,
+            ]);
+        }
+
+        return $this->epgSource;
+    }
+
+    /**
+     * Ensure an EPG channel exists for the given Twitch login.
+     *
+     * @param  array{display_name?: string, logo?: string, language?: string}  $metadata
+     */
+    private function ensureEpgChannel(Epg $epg, int $userId, string $login, array $metadata): EpgChannel
+    {
+        $channelId = 'streamarr-'.$login;
+
+        $epgChannel = EpgChannel::firstOrCreate(
+            ['name' => $channelId, 'channel_id' => $channelId, 'epg_id' => $epg->id, 'user_id' => $userId],
+            [
+                'display_name' => $metadata['display_name'] ?? $login,
+                'icon' => $metadata['logo'] ?? '',
+                'lang' => $metadata['language'] ?? '',
+            ],
+        );
+
+        // Keep display name and icon up to date
+        $epgChannel->updateQuietly([
+            'display_name' => $metadata['display_name'] ?? $login,
+            'icon' => $metadata['logo'] ?? '',
+        ]);
+
+        return $epgChannel;
+    }
+
+    /**
+     * Write EPG programme data for all live Streamarr channels.
+     * Splits programmes across date-based JSONL files (today + 3 days).
+     */
+    private function writeEpgData(int $userId): void
+    {
+        $epg = $this->epgSource ?? $this->ensureEpgSource($userId);
+
+        /** @var Collection<int, Channel> $channels */
+        $channels = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->whereJsonContains('info->twitch_stream_type', self::STREAM_TYPE_LIVE)
+            ->get();
+
+        $cacheDir = "epg-cache/{$epg->uuid}/v1";
+        $now = Carbon::now();
+        $daysForward = 3;
+
+        // Collect date range for file output
+        $minDate = $now->copy()->startOfDay();
+        $maxDate = $now->copy()->addDays($daysForward)->endOfDay();
+
+        // Group programmes by date
+        /** @var array<string, list<string>> $programmesByDate */
+        $programmesByDate = [];
+        $channelsData = [];
+        $totalProgrammes = 0;
+
+        foreach ($channels as $channel) {
+            $info = $channel->info ?? [];
+            $login = $info['twitch_login'] ?? '';
+
+            if (! $login) {
+                continue;
+            }
+
+            $channelId = 'streamarr-'.$login;
+
+            $channelsData[$channelId] = [
+                'id' => $channelId,
+                'display_name' => $info['twitch_display_name'] ?? $login,
+                'icon' => $channel->logo_internal ?? '',
+                'lang' => $channel->lang ?? '',
+            ];
+
+            $history = $info['twitch_epg_history'] ?? [];
+            $currentGame = $info['twitch_game'] ?? '';
+            $currentGameArt = $info['twitch_game_box_art'] ?? '';
+
+            if ($this->epgMode === 'title') {
+                // Title mode: single programme per channel using the stream title
+                $streamStarted = $info['twitch_stream_started'] ?? $now->toISOString();
+                $start = Carbon::parse($streamStarted);
+
+                if ($start->lt($minDate)) {
+                    $start = $minDate->copy();
+                }
+
+                $programme = [
+                    'channel' => $channelId,
+                    'start' => $start->toISOString(),
+                    'stop' => $maxDate->copy()->toISOString(),
+                    'title' => $channel->title ?: ($info['twitch_display_name'] ?? $login),
+                    'subtitle' => $currentGame ?: '',
+                    'desc' => $currentGame ? "Playing: {$currentGame}" : '',
+                    'category' => 'Live Stream',
+                    'episode_num' => '',
+                    'rating' => '',
+                    'icon' => $currentGameArt ?: ($channel->logo_internal ?? ''),
+                    'images' => [],
+                    'new' => false,
+                ];
+
+                $line = json_encode(['channel' => $channelId, 'programme' => $programme], JSON_UNESCAPED_UNICODE);
+
+                $datePointer = $start->copy()->startOfDay();
+                while ($datePointer->lte($maxDate)) {
+                    $dateKey = $datePointer->format('Y-m-d');
+                    $programmesByDate[$dateKey][] = $line;
+                    $datePointer->addDay();
+                }
+
+                $totalProgrammes++;
+
+                continue;
+            }
+
+            // Game mode: each game change becomes a separate programme entry
+            if (empty($history)) {
+                // No history yet — create a single programme spanning to maxDate
+                $history = [[
+                    'game' => $currentGame,
+                    'game_box_art' => $currentGameArt,
+                    'started_at' => $now->toISOString(),
+                ]];
+            }
+
+            foreach ($history as $i => $segment) {
+                $start = Carbon::parse($segment['started_at']);
+                $isLastSegment = ! isset($history[$i + 1]);
+
+                // Last segment: extend to fill the EPG guide window
+                $stop = $isLastSegment
+                    ? $maxDate->copy()
+                    : Carbon::parse($history[$i + 1]['started_at']);
+
+                // Skip segments entirely outside our date window
+                if ($stop->lt($minDate) || $start->gt($maxDate)) {
+                    continue;
+                }
+
+                // Clamp to our date window
+                if ($start->lt($minDate)) {
+                    $start = $minDate->copy();
+                }
+                if ($stop->gt($maxDate)) {
+                    $stop = $maxDate->copy();
+                }
+
+                $programme = [
+                    'channel' => $channelId,
+                    'start' => $start->toISOString(),
+                    'stop' => $stop->toISOString(),
+                    'title' => $segment['game'] ?: 'Live',
+                    'subtitle' => $info['twitch_display_name'] ?? $login,
+                    'desc' => $channel->title ?? '',
+                    'category' => 'Live Stream',
+                    'episode_num' => '',
+                    'rating' => '',
+                    'icon' => $segment['game_box_art'] ?? '',
+                    'images' => [],
+                    'new' => false,
+                ];
+
+                $line = json_encode(['channel' => $channelId, 'programme' => $programme], JSON_UNESCAPED_UNICODE);
+
+                // Add to every date file that this programme spans
+                $datePointer = $start->copy()->startOfDay();
+                while ($datePointer->lte($stop)) {
+                    $dateKey = $datePointer->format('Y-m-d');
+                    $programmesByDate[$dateKey][] = $line;
+                    $datePointer->addDay();
+                }
+
+                $totalProgrammes++;
+            }
+        }
+
+        // Write date-based JSONL files
+        for ($d = 0; $d <= $daysForward; $d++) {
+            $dateKey = $now->copy()->addDays($d)->format('Y-m-d');
+            $lines = $programmesByDate[$dateKey] ?? [];
+            Storage::disk('local')->put(
+                "{$cacheDir}/programmes-{$dateKey}.jsonl",
+                empty($lines) ? '' : implode("\n", $lines),
+            );
+        }
+
+        // Write channels.json
+        Storage::disk('local')->put(
+            "{$cacheDir}/channels.json",
+            json_encode($channelsData, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+        );
+
+        // Write metadata
+        $metadata = [
+            'cache_created' => time(),
+            'cache_version' => 'v1',
+            'epg_uuid' => $epg->uuid,
+            'total_channels' => count($channelsData),
+            'total_programmes' => $totalProgrammes,
+            'programme_date_range' => [
+                'min_date' => $minDate->format('Y-m-d'),
+                'max_date' => $maxDate->format('Y-m-d'),
+            ],
+        ];
+
+        Storage::disk('local')->put(
+            "{$cacheDir}/metadata.json",
+            json_encode($metadata, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+        );
+
+        $epg->update([
+            'is_cached' => true,
+            'cache_progress' => 100,
+            'cache_meta' => $metadata,
+            'channel_count' => count($channelsData),
+            'programme_count' => $totalProgrammes,
+        ]);
     }
 }

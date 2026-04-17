@@ -9,7 +9,8 @@
   "class": "AppLocalPlugins\\Streamarr\\Plugin",
   "capabilities": [
     "channel_processor",
-    "scheduled"
+    "scheduled",
+    "epg_processor"
   ],
   "hooks": [],
   "permissions": [
@@ -85,6 +86,17 @@
       "type": "text",
       "default": "Twitch Live",
       "helper_text": "Group name for live-stream channels. Used in static mode, and as fallback in game mode when the game is unknown."
+    },
+    {
+      "id": "epg_mode",
+      "label": "EPG Mode",
+      "type": "select",
+      "default": "game",
+      "options": {
+        "game": "Game / Category (shows game changes as programme entries)",
+        "title": "Stream Title (single programme with the stream title)"
+      },
+      "helper_text": "Game mode creates a new programme entry each time the streamer switches games. Title mode shows a single continuous programme using the stream title — useful if you prefer all channels under one group with simpler EPG."
     },
     {
       "id": "vod_group",

@@ -150,6 +150,17 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             }
         }
 
+        // Fetch profile images for live channels (streamlink does not provide them)
+        if (! $useApi && ! empty($liveStreams)) {
+            foreach ($liveStreams as $i => &$stream) {
+                if (empty($stream['profile_image'])) {
+                    $context->heartbeat("Fetching avatar for {$stream['login']}…", progress: (int) (65 + ($i / count($liveStreams)) * 5));
+                    $stream['profile_image'] = $this->fetchProfileImageFallback($stream['login']);
+                }
+            }
+            unset($stream);
+        }
+
         $context->heartbeat('Processing live streams…', progress: 70);
 
         // --- Process live streams ---
@@ -375,6 +386,11 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 if ($useApi && $this->accessToken) {
                     $profiles = $this->batchGetUsers($settings, [$login]);
                     $userProfile = $profiles[$login] ?? [];
+                }
+
+                // Fetch profile image from channel page when API is not available
+                if (! $useApi && empty($streamInfo['profile_image'])) {
+                    $streamInfo['profile_image'] = $this->fetchProfileImageFallback($login);
                 }
 
                 $channelNumber = $this->nextChannelNumber($userId, $settings, $login, null);
@@ -832,10 +848,16 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             foreach ($response->json('data', []) as $user) {
                 $login = strtolower($user['login'] ?? '');
                 if ($login) {
+                    // Downsize to 70x70 — sufficient for channel logos and saves bandwidth
+                    $profileImage = $user['profile_image_url'] ?? '';
+                    if ($profileImage !== '') {
+                        $profileImage = preg_replace('#-\d+x\d+\.#', '-70x70.', $profileImage);
+                    }
+
                     $results[$login] = [
                         'user_id' => (string) ($user['id'] ?? ''),
                         'display_name' => $user['display_name'] ?? $login,
-                        'profile_image' => $user['profile_image_url'] ?? '',
+                        'profile_image' => $profileImage,
                         'login' => $login,
                     ];
                 }
@@ -1004,6 +1026,42 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Fetch a Twitch user's profile image URL by parsing the channel page HTML.
+     * Used as a fallback when Twitch API credentials are not configured.
+     */
+    private function fetchProfileImageFallback(string $login): string
+    {
+        try {
+            $response = Http::timeout(10)->get("https://www.twitch.tv/{$login}");
+
+            if (! $response->successful()) {
+                return '';
+            }
+
+            $html = $response->body();
+
+            // Best match: Twitch profile image URL (contains "profile_image" in the CDN path)
+            if (preg_match('#https://static-cdn\.jtvnw\.net/jtv_user_pictures/[^"\'\s]+profile_image[^"\'\s]*#', $html, $m)) {
+                // Downsize to 70x70 — sufficient for channel logos and saves bandwidth
+                return preg_replace('#-\d+x\d+\.#', '-70x70.', $m[0]);
+            }
+
+            // Fallback: og:image meta tag (may be stream preview when live)
+            if (preg_match('/<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']/', $html, $m)) {
+                return $m[1];
+            }
+
+            if (preg_match('/<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']/', $html, $m)) {
+                return $m[1];
+            }
+
+            return '';
+        } catch (\Throwable) {
+            return '';
+        }
+    }
 
     /**
      * Determine the group name for a channel based on group_mode, stream type, and metadata.

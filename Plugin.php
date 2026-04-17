@@ -5,6 +5,7 @@ namespace AppLocalPlugins\Streamarr;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Enums\EpgSourceType;
+use App\Enums\Status;
 use App\Models\Epg;
 use App\Models\EpgChannel;
 use App\Models\Group;

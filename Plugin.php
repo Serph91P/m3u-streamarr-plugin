@@ -22,6 +22,7 @@ use Cron\CronExpression;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Spatie\Tags\Tag;
@@ -43,6 +44,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     /** @var string EPG mode for current action run: 'game' or 'title' */
     private string $epgMode = 'game';
 
+    private ?bool $groupsEnabledColumnExists = null;
+
+    private ?bool $groupsSortOrderColumnExists = null;
+
     // -------------------------------------------------------------------------
     // PluginInterface
     // -------------------------------------------------------------------------
@@ -51,6 +56,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     {
         return match ($action) {
             'check_now' => $this->handleCheckNow($context),
+            'repair_xtream' => $this->handleRepairXtream($context),
             'add_manual' => $this->handleAddManual($payload, $context),
             'cleanup' => $this->handleCleanup($context),
             'reset_all' => $this->handleResetAll($context),
@@ -119,6 +125,16 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $cleaned = 0;
         $errors = [];
         $cookiesFile = $this->getCookiesFile($profile);
+
+        // --- Heal group assignments for all existing streamarr channels ---
+        // This runs unconditionally so channels whose streams are currently offline
+        // also get the correct playlist-scoped group (required for Xtream visibility).
+        $this->healGroupAssignments($settings, $userId, $context);
+
+        // --- Heal Xtream compatibility channel numbering ---
+        // Some IPTV Xtream clients ignore channels outside a bounded number range.
+        // Keep plugin channels in a configurable safe range by default.
+        $this->healXtreamCompatibilityNumbers($settings, $userId, $context);
 
         $context->heartbeat('Detecting live streams…', progress: 5);
 
@@ -352,6 +368,26 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'skipped' => $skipped,
             'cleaned' => $cleaned,
         ]);
+    }
+
+    private function handleRepairXtream(PluginExecutionContext $context): PluginActionResult
+    {
+        $settings = $context->settings;
+        ['userId' => $userId] = $this->resolveContext($context);
+
+        if (! $userId) {
+            return PluginActionResult::failure('Could not determine user ID. Ensure a Stream Profile is configured.');
+        }
+
+        // Force compatibility repair regardless of stored toggle state.
+        $repairSettings = $settings;
+        $repairSettings['xtream_compat_mode'] = true;
+
+        $this->healGroupAssignments($repairSettings, $userId, $context);
+        $this->healXtreamCompatibilityNumbers($repairSettings, $userId, $context);
+        $this->healXtreamTextCompatibility($repairSettings, $userId, $context);
+
+        return PluginActionResult::success('Xtream repair completed. Group mapping, channel numbering, and text compatibility were reconciled.');
     }
 
     private function handleAddManual(array $payload, PluginExecutionContext $context): PluginActionResult
@@ -666,13 +702,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $profileId = (int) ($settings['stream_profile_id'] ?? 0);
         $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
         $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+        $channelTitle = $this->sanitizeXtreamText((string) ($metadata['title'] ?? ''), $settings);
+        $channelName = $this->sanitizeXtreamText((string) ($metadata['display_name'] ?? $login), $settings);
 
-        $group = $playlistId
-            ? Group::firstOrCreate(
-                ['name' => $groupName, 'user_id' => $userId, 'playlist_id' => $playlistId],
-                ['user_id' => $userId, 'playlist_id' => $playlistId],
-            )
-            : null;
+        $group = $this->resolveOrCreateGroup($groupName, $userId, $playlistId, $customPlaylistId);
 
         $customPlaylist = $customPlaylistId ? CustomPlaylist::find($customPlaylistId) : null;
 
@@ -762,8 +795,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
             $movieData = [
                 'stream_id' => 0,
-                'name' => $metadata['title'],
-                'title' => $metadata['title'],
+                'name' => $channelTitle,
+                'title' => $channelTitle,
                 'year' => $year ?? '',
                 'added' => $addedTimestamp ?: (string) time(),
                 'category_id' => (string) ($group?->id ?? ''),
@@ -776,14 +809,16 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         $channel = Channel::create([
             'uuid' => Str::orderedUuid()->toString(),
-            'name' => $metadata['display_name'] ?? $login,
-            'title' => $metadata['title'],
+            'name' => $channelName,
+            'title' => $channelTitle,
             'url' => $url,
             'channel' => (int) $channelNumber,
             'sort' => (float) $channelNumber,
             'stream_id' => 'streamarr-'.$login,
             'epg_channel_id' => $metadata['epg_channel_id'] ?? null,
             'lang' => $metadata['language'] ?? '',
+            'group' => $groupName,
+            'group_internal' => $groupName,
             'is_custom' => true,
             'is_vod' => $isVod,
             'enabled' => true,
@@ -795,7 +830,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'group_id' => $group?->id,
             'stream_profile_id' => $profileId ?: null,
             'playlist_id' => $playlistId,
-            'custom_playlist_id' => $playlistId ? null : $customPlaylist?->id,
+            'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'info' => $info,
             'container_extension' => $isVod ? 'ts' : null,
             'year' => $year,
@@ -808,10 +843,16 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $channel->update(['movie_data' => $movieData]);
         }
 
-        if ($customPlaylist) {
-            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
-            if ($groupTag) {
-                $channel->attachTag($groupTag);
+        // Sync with custom playlist if one was specified
+        if ($customPlaylistId) {
+            if (! $customPlaylist) {
+                $customPlaylist = CustomPlaylist::find($customPlaylistId);
+            }
+            if ($customPlaylist) {
+                $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+                if ($groupTag) {
+                    $channel->attachTag($groupTag);
+                }
             }
         }
 
@@ -827,10 +868,38 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $changed = false;
         $info = $channel->info ?? [];
 
+        // Backfill missing playlist assignment for legacy channels.
+        if (! $channel->playlist_id && ! $channel->custom_playlist_id) {
+            $targetPlaylistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+            $targetCustomPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+
+            if ($targetPlaylistId) {
+                $channel->playlist_id = $targetPlaylistId;
+                $channel->custom_playlist_id = null;
+                $changed = true;
+            } elseif ($targetCustomPlaylistId) {
+                $channel->custom_playlist_id = $targetCustomPlaylistId;
+                $changed = true;
+
+                $customPlaylist = CustomPlaylist::find($targetCustomPlaylistId);
+                if ($customPlaylist) {
+                    $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+                }
+            }
+        }
+
         $previousTitle = trim((string) ($info['twitch_title'] ?? $channel->title ?? ''));
         $newTitle = $stream['title'] ?? '';
-        if ($newTitle && $newTitle !== $channel->title) {
-            $channel->title = $newTitle;
+        $sanitizedTitle = $this->sanitizeXtreamText((string) $newTitle, $settings);
+        if ($sanitizedTitle && $sanitizedTitle !== $channel->title) {
+            $channel->title = $sanitizedTitle;
+            $changed = true;
+        }
+
+        $rawDisplayName = (string) ($stream['display_name'] ?? $channel->name ?? '');
+        $sanitizedName = $this->sanitizeXtreamText($rawDisplayName, $settings);
+        if ($sanitizedName && $sanitizedName !== $channel->name) {
+            $channel->name = $sanitizedName;
             $changed = true;
         }
 
@@ -922,40 +991,46 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $changed = true;
         }
 
-        // Re-group if game mode and game changed
+        $playlistId = (int) ($channel->playlist_id ?: ($settings['target_playlist_id'] ?? 0)) ?: null;
+        $customPlaylistId = $playlistId
+            ? null
+            : ((int) ($channel->custom_playlist_id ?: ($settings['target_custom_playlist_id'] ?? 0)) ?: null);
+
+        // Always ensure a valid group is assigned, including channels created before this fix.
+        $expectedGroupName = $this->resolveGroupName([
+            'game' => $newGame,
+        ], self::STREAM_TYPE_LIVE, $settings);
+        $expectedGroup = $this->resolveOrCreateGroup($expectedGroupName, $userId, $playlistId, $customPlaylistId);
+        if ($expectedGroup && (int) $channel->group_id !== (int) $expectedGroup->id) {
+            $channel->group_id = $expectedGroup->id;
+            $changed = true;
+        }
+
+        // Ensure the group text fields are always set (required for channel overview display).
+        if ($expectedGroupName && $channel->group !== $expectedGroupName) {
+            $channel->group = $expectedGroupName;
+            $channel->group_internal = $expectedGroupName;
+            $changed = true;
+        }
+
+        // Update category tags for custom playlists when game mode changes category.
         $groupMode = $settings['group_mode'] ?? 'static';
-        if ($groupMode === 'game' && $newGame !== $oldGame && $newGame !== '') {
-            $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
-            $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
-
-            if ($playlistId) {
-                $newGroup = Group::firstOrCreate(
-                    ['name' => $newGame, 'user_id' => $userId, 'playlist_id' => $playlistId],
-                    ['user_id' => $userId, 'playlist_id' => $playlistId],
-                );
-                $channel->group_id = $newGroup->id;
-                $changed = true;
-            }
-
-            if ($customPlaylistId) {
-                $customPlaylist = CustomPlaylist::find($customPlaylistId);
-                if ($customPlaylist) {
-                    // Remove old game tag, add new one
-                    if ($oldGame) {
-                        $oldTag = $customPlaylist->groupTags()->where('name->en', $oldGame)->first();
-                        if ($oldTag) {
-                            $channel->detachTag($oldTag);
-                        }
+        if ($groupMode === 'game' && $newGame !== $oldGame && $newGame !== '' && $customPlaylistId) {
+            $customPlaylist = CustomPlaylist::find($customPlaylistId);
+            if ($customPlaylist) {
+                if ($oldGame) {
+                    $oldTag = $customPlaylist->groupTags()->where('name->en', $oldGame)->first();
+                    if ($oldTag) {
+                        $channel->detachTag($oldTag);
                     }
-
-                    $newTag = $customPlaylist->groupTags()->where('name->en', $newGame)->first();
-                    if (! $newTag) {
-                        $newTag = Tag::create(['name' => ['en' => $newGame], 'type' => $customPlaylist->uuid]);
-                        $customPlaylist->attachTag($newTag);
-                    }
-                    $channel->attachTag($newTag);
-                    $changed = true;
                 }
+
+                $newTag = $customPlaylist->groupTags()->where('name->en', $newGame)->first();
+                if (! $newTag) {
+                    $newTag = Tag::create(['name' => ['en' => $newGame], 'type' => $customPlaylist->uuid]);
+                    $customPlaylist->attachTag($newTag);
+                }
+                $channel->attachTag($newTag);
             }
         }
 
@@ -1037,6 +1112,9 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $mode = $settings['channel_numbering_mode'] ?? 'sequential';
         $increment = (int) ($settings['channel_number_increment'] ?? 1);
         $starting = (int) ($settings['starting_channel_number'] ?? 3000);
+        $xtreamCompat = $this->isXtreamCompatibilityModeEnabled($settings);
+        $xtreamMin = max(1, (int) ($settings['xtream_min_channel_number'] ?? 900));
+        $xtreamMax = max($xtreamMin, (int) ($settings['xtream_max_channel_number'] ?? 999));
 
         if ($mode === 'decimal' && $baseNumber !== null) {
             $sibling = Channel::where('user_id', $userId)
@@ -1062,10 +1140,56 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             ->value('channel');
 
         if ($last === null) {
+            if ($xtreamCompat && $starting > $xtreamMax) {
+                $fallback = $this->findNextFreeChannelNumber($userId, $xtreamMin, $xtreamMax);
+                if ($fallback !== null) {
+                    return $fallback;
+                }
+            }
+
             return $starting;
         }
 
-        return (int) $last + $increment;
+        $candidate = (int) $last + $increment;
+
+        if ($xtreamCompat && $candidate > $xtreamMax) {
+            $fallback = $this->findNextFreeChannelNumber($userId, $xtreamMin, $xtreamMax);
+            if ($fallback !== null) {
+                return $fallback;
+            }
+        }
+
+        return $candidate;
+    }
+
+    private function isXtreamCompatibilityModeEnabled(array $settings): bool
+    {
+        return (bool) ($settings['xtream_compat_mode'] ?? true);
+    }
+
+    private function findNextFreeChannelNumber(int $userId, int $min, int $max, ?int $excludeChannelId = null): ?int
+    {
+        $query = Channel::where('user_id', $userId)
+            ->whereNotNull('channel')
+            ->where('channel', '>=', $min)
+            ->where('channel', '<=', $max);
+
+        if ($excludeChannelId) {
+            $query->where('id', '!=', $excludeChannelId);
+        }
+
+        $used = [];
+        foreach ($query->pluck('channel')->all() as $value) {
+            $used[(int) floor((float) $value)] = true;
+        }
+
+        for ($candidate = $min; $candidate <= $max; $candidate++) {
+            if (! isset($used[$candidate])) {
+                return $candidate;
+            }
+        }
+
+        return null;
     }
 
     // -------------------------------------------------------------------------
@@ -1443,16 +1567,278 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     private function resolveGroupName(array $metadata, string $streamType, array $settings): string
     {
         if ($streamType === self::STREAM_TYPE_VOD) {
-            return $settings['vod_group'] ?? 'Twitch VODs';
+            $vodGroup = trim((string) ($settings['vod_group'] ?? ''));
+
+            return $vodGroup !== '' ? $vodGroup : 'Twitch VODs';
         }
 
         $groupMode = $settings['group_mode'] ?? 'static';
 
         if ($groupMode === 'game' && ! empty($metadata['game'])) {
-            return $metadata['game'];
+            return trim((string) $metadata['game']);
         }
 
-        return $settings['channel_group'] ?? 'Twitch Live';
+        $liveGroup = trim((string) ($settings['channel_group'] ?? ''));
+
+        return $liveGroup !== '' ? $liveGroup : 'Twitch Live';
+    }
+
+    /**
+     * Heal group assignments for all existing streamarr channels.
+     *
+     * Runs at the start of every Check Now cycle so that channels whose streams
+     * are currently offline also receive the correct playlist-scoped group.
+     * Without this, offline channels retain their old (null-playlist) group and
+     * do not appear as a category in playlist-scoped Xtream views.
+     */
+    private function healGroupAssignments(array $settings, int $userId, PluginExecutionContext $context): void
+    {
+        $targetPlaylistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+        $targetCustomPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+
+        if (! $targetPlaylistId && ! $targetCustomPlaylistId) {
+            return;
+        }
+
+        $channels = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->get();
+
+        $healed = 0;
+
+        foreach ($channels as $channel) {
+            $channelChanged = false;
+
+            // Backfill missing playlist assignment.
+            if (! $channel->playlist_id && ! $channel->custom_playlist_id) {
+                if ($targetPlaylistId) {
+                    $channel->playlist_id = $targetPlaylistId;
+                    $channel->custom_playlist_id = null;
+                    $channelChanged = true;
+                } elseif ($targetCustomPlaylistId) {
+                    $channel->custom_playlist_id = $targetCustomPlaylistId;
+                    $channelChanged = true;
+
+                    $customPlaylist = CustomPlaylist::find($targetCustomPlaylistId);
+                    if ($customPlaylist) {
+                        $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+                    }
+                }
+            }
+
+            // Resolve the current playlist scope (prefer the channel's own value, fall back to settings).
+            $playlistId = (int) ($channel->playlist_id ?: ($settings['target_playlist_id'] ?? 0)) ?: null;
+            $customPlaylistId = $playlistId
+                ? null
+                : ((int) ($channel->custom_playlist_id ?: ($settings['target_custom_playlist_id'] ?? 0)) ?: null);
+
+            if (! $playlistId && ! $customPlaylistId) {
+                continue;
+            }
+
+            $streamType = ($channel->info['twitch_stream_type'] ?? self::STREAM_TYPE_LIVE);
+            $game = $channel->info['twitch_game'] ?? '';
+            $expectedGroupName = $this->resolveGroupName(['game' => $game], $streamType, $settings);
+            $expectedGroup = $this->resolveOrCreateGroup($expectedGroupName, $userId, $playlistId, $customPlaylistId);
+
+            if ($expectedGroup && (int) $channel->group_id !== (int) $expectedGroup->id) {
+                $channel->group_id = $expectedGroup->id;
+                $channelChanged = true;
+            }
+
+            // Ensure the group text fields are always set (required for channel overview display).
+            if ($expectedGroupName && $channel->group !== $expectedGroupName) {
+                $channel->group = $expectedGroupName;
+                $channel->group_internal = $expectedGroupName;
+                $channelChanged = true;
+            }
+
+            if ($channelChanged) {
+                $channel->save();
+                $healed++;
+            }
+        }
+
+        if ($healed > 0) {
+            $context->info("Healed group assignments for {$healed} channel(s).");
+        }
+    }
+
+    private function healXtreamCompatibilityNumbers(array $settings, int $userId, PluginExecutionContext $context): void
+    {
+        if (! $this->isXtreamCompatibilityModeEnabled($settings)) {
+            return;
+        }
+
+        if (($settings['channel_numbering_mode'] ?? 'sequential') !== 'sequential') {
+            return;
+        }
+
+        $min = max(1, (int) ($settings['xtream_min_channel_number'] ?? 900));
+        $max = max($min, (int) ($settings['xtream_max_channel_number'] ?? 999));
+
+        $channels = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->orderBy('channel')
+            ->get();
+
+        $renumbered = 0;
+
+        foreach ($channels as $channel) {
+            $current = (int) floor((float) ($channel->channel ?? 0));
+            $isOutOfRange = $current < $min || $current > $max;
+
+            if (! $isOutOfRange) {
+                continue;
+            }
+
+            $replacement = $this->findNextFreeChannelNumber($userId, $min, $max, (int) $channel->id);
+            if ($replacement === null) {
+                continue;
+            }
+
+            if ((int) $channel->channel === $replacement) {
+                continue;
+            }
+
+            $channel->channel = $replacement;
+            $channel->sort = (float) $replacement;
+            $channel->save();
+            $renumbered++;
+        }
+
+        if ($renumbered > 0) {
+            $context->info("Healed Xtream compatibility by renumbering {$renumbered} channel(s) to {$min}-{$max}.");
+        }
+    }
+
+    private function healXtreamTextCompatibility(array $settings, int $userId, PluginExecutionContext $context): void
+    {
+        if (! ((bool) ($settings['xtream_ascii_text_mode'] ?? true))) {
+            return;
+        }
+
+        $channels = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->get();
+
+        $updated = 0;
+
+        foreach ($channels as $channel) {
+            $changed = false;
+
+            $safeTitle = $this->sanitizeXtreamText((string) ($channel->title ?? ''), $settings);
+            if ($safeTitle !== '' && $safeTitle !== $channel->title) {
+                $channel->title = $safeTitle;
+                $changed = true;
+            }
+
+            $safeName = $this->sanitizeXtreamText((string) ($channel->name ?? ''), $settings);
+            if ($safeName !== '' && $safeName !== $channel->name) {
+                $channel->name = $safeName;
+                $changed = true;
+            }
+
+            if ($changed) {
+                $channel->save();
+                $updated++;
+            }
+        }
+
+        if ($updated > 0) {
+            $context->info("Healed Xtream text compatibility for {$updated} channel(s).");
+        }
+    }
+
+    private function sanitizeXtreamText(string $value, array $settings): string
+    {
+        if (! ((bool) ($settings['xtream_ascii_text_mode'] ?? true))) {
+            return trim($value);
+        }
+
+        $normalized = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $value) ?? '';
+        $normalized = trim(preg_replace('/\s+/u', ' ', $normalized) ?? '');
+
+        $ascii = Str::ascii($normalized);
+        $ascii = trim(preg_replace('/\s+/', ' ', $ascii) ?? '');
+
+        return $ascii !== '' ? $ascii : $normalized;
+    }
+
+    private function resolveOrCreateGroup(string $groupName, int $userId, ?int $playlistId, ?int $customPlaylistId): ?Group
+    {
+        $normalizedGroupName = trim($groupName);
+        if ($normalizedGroupName === '') {
+            return null;
+        }
+
+        if ($playlistId) {
+            $group = Group::firstOrCreate(
+                ['name' => $normalizedGroupName, 'user_id' => $userId, 'playlist_id' => $playlistId],
+                ['user_id' => $userId, 'playlist_id' => $playlistId],
+            );
+
+            $this->ensureGroupVisibleInClients($group);
+
+            return $group;
+        }
+
+        if ($customPlaylistId) {
+            $group = Group::firstOrCreate(
+                ['name' => $normalizedGroupName, 'user_id' => $userId, 'playlist_id' => null],
+                ['user_id' => $userId, 'playlist_id' => null],
+            );
+
+            $this->ensureGroupVisibleInClients($group);
+
+            return $group;
+        }
+
+        return null;
+    }
+
+    private function ensureGroupVisibleInClients(Group $group): void
+    {
+        $needsSave = false;
+
+        if ($this->groupsEnabledColumnExists() && ! (bool) $group->enabled) {
+            $group->enabled = true;
+            $needsSave = true;
+        }
+
+        if ($this->groupsSortOrderColumnExists()) {
+            $sortOrder = (float) ($group->sort_order ?? 9999);
+            if ($sortOrder >= 9999) {
+                $group->sort_order = 1;
+                $needsSave = true;
+            }
+        }
+
+        if ($needsSave) {
+            $group->save();
+        }
+    }
+
+    private function groupsEnabledColumnExists(): bool
+    {
+        if ($this->groupsEnabledColumnExists !== null) {
+            return $this->groupsEnabledColumnExists;
+        }
+
+        $this->groupsEnabledColumnExists = Schema::hasColumn('groups', 'enabled');
+
+        return $this->groupsEnabledColumnExists;
+    }
+
+    private function groupsSortOrderColumnExists(): bool
+    {
+        if ($this->groupsSortOrderColumnExists !== null) {
+            return $this->groupsSortOrderColumnExists;
+        }
+
+        $this->groupsSortOrderColumnExists = Schema::hasColumn('groups', 'sort_order');
+
+        return $this->groupsSortOrderColumnExists;
     }
 
     /**

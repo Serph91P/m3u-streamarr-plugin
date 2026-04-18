@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.4.0",
+  "version": "1.4.7",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch channels for livestreams & VODs, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback.",
@@ -147,8 +147,8 @@
       "id": "starting_channel_number",
       "label": "Starting Channel Number",
       "type": "number",
-      "default": 3000,
-      "helper_text": "First channel number to assign. Each new stream increments from here."
+      "default": 900,
+      "helper_text": "First channel number to assign. Each new stream increments from here. For best Xtream client compatibility, keep this in a low range (for example 900-999)."
     },
     {
       "id": "channel_number_increment",
@@ -163,10 +163,38 @@
       "type": "select",
       "default": "sequential",
       "options": {
-        "sequential": "Sequential (3000, 3001, 3002)",
+        "sequential": "Sequential (900, 901, 902)",
         "decimal": "Decimal (50.1, 50.2, 50.3)"
       },
       "helper_text": "Decimal mode groups streams from the same Twitch channel using the channel's BaseNumber. Sequential mode uses a global counter."
+    },
+    {
+      "id": "xtream_compat_mode",
+      "label": "Xtream Compatibility Mode",
+      "type": "boolean",
+      "default": true,
+      "helper_text": "When enabled, Streamarr keeps channel numbers in a bounded range to avoid clients that hide high channel numbers."
+    },
+    {
+      "id": "xtream_min_channel_number",
+      "label": "Xtream Min Channel Number",
+      "type": "number",
+      "default": 900,
+      "helper_text": "Lower bound for Xtream compatibility numbering."
+    },
+    {
+      "id": "xtream_max_channel_number",
+      "label": "Xtream Max Channel Number",
+      "type": "number",
+      "default": 999,
+      "helper_text": "Upper bound for Xtream compatibility numbering. Existing plugin channels outside this range are auto-renumbered on Check Now."
+    },
+    {
+      "id": "xtream_ascii_text_mode",
+      "label": "Xtream ASCII Text Compatibility",
+      "type": "boolean",
+      "default": true,
+      "helper_text": "Removes emoji and problematic special characters from Streamarr channel names/titles to improve compatibility with strict Xtream clients."
     },
     {
       "id": "twitch_client_id",
@@ -203,6 +231,12 @@
     {
       "id": "check_now",
       "label": "Check Now",
+      "dry_run": false,
+      "fields": []
+    },
+    {
+      "id": "repair_xtream",
+      "label": "Repair Xtream Mapping",
       "dry_run": false,
       "fields": []
     },

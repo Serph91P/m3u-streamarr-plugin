@@ -99,7 +99,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return PluginActionResult::failure('Could not determine user ID. Ensure a Stream Profile is configured.');
         }
 
-        $this->epgMode = $settings['epg_mode'] ?? 'game';
+        $this->epgMode = $this->resolveEpgMode($settings);
         $channelEntries = $this->parseMonitoredChannels($settings['monitored_channels'] ?? '');
 
         if (empty($channelEntries)) {
@@ -224,6 +224,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 'title' => $stream['title'] ?? "{$login} - Live",
                 'game' => $stream['game'] ?? '',
                 'game_box_art' => $stream['game_box_art'] ?? '',
+                'stream_started' => $stream['started_at'] ?? Carbon::now()->toISOString(),
                 'logo' => $logo,
                 'thumbnail' => $stream['thumbnail'] ?? '',
                 'language' => $stream['language'] ?? '',
@@ -356,7 +357,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     private function handleAddManual(array $payload, PluginExecutionContext $context): PluginActionResult
     {
         $settings = $context->settings;
-        $this->epgMode = $settings['epg_mode'] ?? 'game';
+        $this->epgMode = $this->resolveEpgMode($settings);
         ['userId' => $userId, 'profile' => $profile] = $this->resolveContext($context);
 
         if (! $userId) {
@@ -445,6 +446,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                     'title' => $streamInfo['title'] ?? "{$login} - Live",
                     'game' => $streamInfo['game'] ?? '',
                     'game_box_art' => $streamInfo['game_box_art'] ?? '',
+                    'stream_started' => $streamInfo['started_at'] ?? Carbon::now()->toISOString(),
                     'logo' => $streamInfo['profile_image'] ?? ($userProfile['profile_image'] ?? ''),
                     'thumbnail' => $streamInfo['thumbnail'] ?? '',
                     'language' => $streamInfo['language'] ?? '',
@@ -561,7 +563,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     private function handleCleanup(PluginExecutionContext $context): PluginActionResult
     {
         $settings = $context->settings;
-        $this->epgMode = $settings['epg_mode'] ?? 'game';
+        $this->epgMode = $this->resolveEpgMode($settings);
         ['userId' => $userId, 'profile' => $profile] = $this->resolveContext($context);
 
         if (! $userId) {
@@ -621,6 +623,20 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $context->info("Deleted {$count} channel(s) created by Streamarr.");
 
         return PluginActionResult::success("Reset complete - deleted {$count} channel(s).", ['deleted' => $count]);
+    }
+
+    /**
+     * Normalize EPG mode from plugin settings.
+     * Maps legacy/alternate values to either "game" or "title".
+     */
+    private function resolveEpgMode(array $settings): string
+    {
+        $rawMode = strtolower(trim((string) ($settings['epg_mode'] ?? 'game')));
+
+        return match ($rawMode) {
+            'title', 'stream_title', 'stream-title', 'streamtitle' => 'title',
+            default => 'game',
+        };
     }
 
     // -------------------------------------------------------------------------
@@ -683,6 +699,12 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 'game' => $metadata['game'] ?? '',
                 'game_box_art' => $metadata['game_box_art'] ?? '',
                 'started_at' => Carbon::now()->toISOString(),
+            ]];
+            $info['twitch_title'] = $metadata['title'] ?? '';
+            $info['twitch_stream_started'] = $metadata['stream_started'] ?? Carbon::now()->toISOString();
+            $info['twitch_title_history'] = [[
+                'title' => $metadata['title'] ?? '',
+                'started_at' => $metadata['stream_started'] ?? Carbon::now()->toISOString(),
             ]];
         }
 
@@ -805,9 +827,51 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $changed = false;
         $info = $channel->info ?? [];
 
+        $previousTitle = trim((string) ($info['twitch_title'] ?? $channel->title ?? ''));
         $newTitle = $stream['title'] ?? '';
         if ($newTitle && $newTitle !== $channel->title) {
             $channel->title = $newTitle;
+            $changed = true;
+        }
+
+        if (($info['twitch_title'] ?? '') !== $newTitle) {
+            $info['twitch_title'] = $newTitle;
+            $changed = true;
+        }
+
+        if (! isset($info['twitch_stream_started'])) {
+            $info['twitch_stream_started'] = $stream['started_at'] ?? Carbon::now()->toISOString();
+            $changed = true;
+        }
+
+        // Initialize title history if missing (for channels created before title segmentation support)
+        if (! isset($info['twitch_title_history'])) {
+            $info['twitch_title_history'] = [[
+                'title' => $previousTitle,
+                'started_at' => $info['twitch_stream_started'] ?? Carbon::now()->toISOString(),
+            ]];
+            $changed = true;
+        }
+
+        $normalizedNewTitle = trim((string) $newTitle);
+        $titleHistory = $info['twitch_title_history'] ?? [];
+        $lastTitle = '';
+        if (! empty($titleHistory)) {
+            $lastSegment = $titleHistory[array_key_last($titleHistory)] ?? [];
+            $lastTitle = trim((string) ($lastSegment['title'] ?? ''));
+        }
+
+        if ($normalizedNewTitle !== '' && $normalizedNewTitle !== $lastTitle) {
+            $titleHistory[] = [
+                'title' => $normalizedNewTitle,
+                'started_at' => Carbon::now()->toISOString(),
+            ];
+
+            if (count($titleHistory) > 50) {
+                $titleHistory = array_slice($titleHistory, -50);
+            }
+
+            $info['twitch_title_history'] = $titleHistory;
             $changed = true;
         }
 
@@ -1085,7 +1149,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      * Returns flat list of live stream data.
      *
      * @param  list<string>  $logins
-     * @return list<array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string, language: string}>
+    * @return list<array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string, language: string, started_at: string}>
      */
     private function batchGetStreams(array $settings, array $logins): array
     {
@@ -1127,6 +1191,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                     'thumbnail' => $thumbnail,
                     'profile_image' => '',
                     'language' => $stream['language'] ?? '',
+                    'started_at' => $stream['started_at'] ?? Carbon::now()->toISOString(),
                 ];
             }
         }
@@ -1248,7 +1313,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     /**
      * Check if a Twitch channel is live using streamlink --json.
      *
-     * @return array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string, language: string}|null
+    * @return array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, thumbnail: string, profile_image: string, language: string, started_at: string}|null
      */
     private function checkChannelLiveViaStreamlink(string $binary, string $login, ?string $cookiesFile): ?array
     {
@@ -1288,6 +1353,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'thumbnail' => '',
             'profile_image' => '',
             'language' => '',
+            'started_at' => Carbon::now()->toISOString(),
         ];
     }
 
@@ -1644,39 +1710,65 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $currentGameArt = $info['twitch_game_box_art'] ?? '';
 
             if ($this->epgMode === 'title') {
-                // Title mode: single programme per channel using the stream title
-                $streamStarted = $info['twitch_stream_started'] ?? $now->toISOString();
-                $start = Carbon::parse($streamStarted);
+                // Title mode: each title change becomes a separate programme entry
+                $titleHistory = $info['twitch_title_history'] ?? [];
 
-                if ($start->lt($minDate)) {
-                    $start = $minDate->copy();
+                if (empty($titleHistory)) {
+                    $titleHistory = [[
+                        'title' => trim((string) ($info['twitch_title'] ?? $channel->title ?? '')),
+                        'started_at' => $info['twitch_stream_started'] ?? $now->toISOString(),
+                    ]];
                 }
 
-                $programme = [
-                    'channel' => $channelId,
-                    'start' => $start->toISOString(),
-                    'stop' => $maxDate->copy()->toISOString(),
-                    'title' => $channel->title ?: ($info['twitch_display_name'] ?? $login),
-                    'subtitle' => $currentGame ?: '',
-                    'desc' => $currentGame ? "Playing: {$currentGame}" : '',
-                    'category' => 'Live Stream',
-                    'episode_num' => '',
-                    'rating' => '',
-                    'icon' => $currentGameArt ?: ($channel->logo_internal ?? ''),
-                    'images' => [],
-                    'new' => false,
-                ];
+                foreach ($titleHistory as $i => $segment) {
+                    $start = Carbon::parse($segment['started_at']);
+                    $isLastSegment = ! isset($titleHistory[$i + 1]);
 
-                $line = json_encode(['channel' => $channelId, 'programme' => $programme], JSON_UNESCAPED_UNICODE);
+                    $stop = $isLastSegment
+                        ? $maxDate->copy()
+                        : Carbon::parse($titleHistory[$i + 1]['started_at']);
 
-                $datePointer = $start->copy()->startOfDay();
-                while ($datePointer->lte($maxDate)) {
-                    $dateKey = $datePointer->format('Y-m-d');
-                    $programmesByDate[$dateKey][] = $line;
-                    $datePointer->addDay();
+                    if ($stop->lt($minDate) || $start->gt($maxDate)) {
+                        continue;
+                    }
+
+                    if ($start->lt($minDate)) {
+                        $start = $minDate->copy();
+                    }
+                    if ($stop->gt($maxDate)) {
+                        $stop = $maxDate->copy();
+                    }
+
+                    $segmentTitle = trim((string) ($segment['title'] ?? ''));
+
+                    $programme = [
+                        'channel' => $channelId,
+                        'start' => $start->toISOString(),
+                        'stop' => $stop->toISOString(),
+                        'title' => $segmentTitle !== ''
+                            ? $segmentTitle
+                            : ($channel->title ?: ($info['twitch_display_name'] ?? $login)),
+                        'subtitle' => $info['twitch_display_name'] ?? $login,
+                        'desc' => $currentGame ? "Playing: {$currentGame}" : '',
+                        'category' => 'Live Stream',
+                        'episode_num' => '',
+                        'rating' => '',
+                        'icon' => $currentGameArt ?: ($channel->logo_internal ?? ''),
+                        'images' => [],
+                        'new' => false,
+                    ];
+
+                    $line = json_encode(['channel' => $channelId, 'programme' => $programme], JSON_UNESCAPED_UNICODE);
+
+                    $datePointer = $start->copy()->startOfDay();
+                    while ($datePointer->lte($stop)) {
+                        $dateKey = $datePointer->format('Y-m-d');
+                        $programmesByDate[$dateKey][] = $line;
+                        $datePointer->addDay();
+                    }
+
+                    $totalProgrammes++;
                 }
-
-                $totalProgrammes++;
 
                 continue;
             }

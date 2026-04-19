@@ -1784,14 +1784,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         if ($customPlaylistId) {
-            $group = Group::firstOrCreate(
-                ['name' => $normalizedGroupName, 'user_id' => $userId, 'playlist_id' => null],
-                ['user_id' => $userId, 'playlist_id' => null],
-            );
-
-            $this->ensureGroupVisibleInClients($group);
-
-            return $group;
+            return null;
         }
 
         return null;

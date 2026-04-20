@@ -310,6 +310,17 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                         ->first();
 
                     if ($existing) {
+                        $expectedExtension = $this->resolveContainerExtension($settings, true);
+                        if ($existing->container_extension !== $expectedExtension) {
+                            $vodMovieData = $existing->movie_data ?? [];
+                            if (! empty($vodMovieData)) {
+                                $vodMovieData['container_extension'] = $expectedExtension;
+                            }
+                            $existing->update([
+                                'container_extension' => $expectedExtension,
+                                'movie_data' => $vodMovieData ?: null,
+                            ]);
+                        }
                         $skipped++;
 
                         continue;
@@ -716,6 +727,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      * Normalize EPG mode from plugin settings.
      * Maps legacy/alternate values to either "game" or "title".
      */
+    private function resolveContainerExtension(array $settings, bool $isVod): ?string
+    {
+        if (($settings['output_format'] ?? 'ts') === 'hls') {
+            return 'm3u8';
+        }
+
+        return $isVod ? 'ts' : null;
+    }
+
     private function resolveEpgMode(array $settings): string
     {
         $rawMode = strtolower(trim((string) ($settings['epg_mode'] ?? 'game')));
@@ -915,7 +935,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 'added' => $addedTimestamp ?: (string) time(),
                 'category_id' => (string) ($group?->id ?? ''),
                 'category_ids' => $group ? [$group->id] : [],
-                'container_extension' => 'ts',
+                'container_extension' => $this->resolveContainerExtension($settings, true),
                 'custom_sid' => '',
                 'direct_source' => '',
             ];
@@ -946,7 +966,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'info' => $info,
-            'container_extension' => $isVod ? 'ts' : null,
+            'container_extension' => $this->resolveContainerExtension($settings, $isVod),
             'year' => $year,
             'movie_data' => $movieData,
         ]);
@@ -1155,6 +1175,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 }
                 $channel->attachTag($newTag);
             }
+        }
+
+        // Sync container_extension with current output_format setting.
+        $expectedExtension = $this->resolveContainerExtension($settings, false);
+        if ($channel->container_extension !== $expectedExtension) {
+            $channel->container_extension = $expectedExtension;
+            $changed = true;
         }
 
         if ($changed) {

@@ -1,10 +1,10 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
-  "description": "Monitor Twitch channels for livestreams & VODs, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback.",
+  "description": "Monitor Twitch channels and YouTube streams for live content, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback. Supports cookie-based authentication for age-restricted or subscriber-only streams.",
   "entrypoint": "Plugin.php",
   "class": "AppLocalPlugins\\Streamarr\\Plugin",
   "capabilities": [
@@ -41,11 +41,11 @@
       "fields": [
         {
           "id": "monitored_channels",
-          "label": "Monitored Twitch Channels",
+          "label": "Monitored Channels (Twitch & YouTube)",
           "type": "textarea",
           "default": "",
           "required": false,
-          "helper_text": "One Twitch username per line. Format: username or username=BaseNumber (for decimal numbering). Lines starting with # are ignored.\n\nExamples:\nnightbot\npokimane=50\nmontanablack88=60\n\n⚠ Without Twitch API credentials, each channel is checked individually via streamlink. This is slow for more than ~20 channels - consider adding API credentials."
+          "helper_text": "One entry per line. Lines starting with # are ignored.\n\nTwitch: username or username=BaseNumber (for decimal numbering)\n  nightbot\n  pokimane=50\n\nYouTube: full URL to a live channel or stream\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\n\nYouTube detection uses streamlink and supports live streams only. Cookies from the linked Stream Profile are automatically passed to streamlink.\n\n⚠ Without Twitch API credentials, each Twitch channel is checked individually via streamlink. This is slow for more than ~20 channels."
         },
         {
           "id": "stream_profile_id",
@@ -133,6 +133,13 @@
           "type": "text",
           "default": "Twitch VODs",
           "helper_text": "Group name for VOD channels."
+        },
+        {
+          "id": "youtube_group",
+          "label": "YouTube Live Group",
+          "type": "text",
+          "default": "YouTube Live",
+          "helper_text": "Group name for YouTube live-stream channels. YouTube channels are always grouped here, regardless of Group Mode."
         }
       ]
     },
@@ -347,6 +354,20 @@
       "label": "Reset All Channels",
       "dry_run": false,
       "fields": []
+    },
+    {
+      "id": "test_url",
+      "label": "Test URL (Debug)",
+      "dry_run": false,
+      "fields": [
+        {
+          "id": "url",
+          "label": "Stream URL",
+          "type": "text",
+          "required": true,
+          "helper_text": "Any URL supported by streamlink (e.g. https://twitch.tv/pokimane or https://www.youtube.com/@ChannelHandle). Returns live status, metadata, and available stream qualities. Cookies from the configured Stream Profile are automatically used."
+        }
+      ]
     }
   ]
 }

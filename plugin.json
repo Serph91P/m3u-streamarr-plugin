@@ -162,6 +162,17 @@
           "helper_text": "Preferred stream quality. Streamlink will select the closest available quality."
         },
         {
+          "id": "output_format",
+          "label": "Output Format",
+          "type": "select",
+          "default": "ts",
+          "options": {
+            "ts": "MPEG-TS",
+            "hls": "HLS / m3u8"
+          },
+          "helper_text": "Container format for created channels. Must match the format configured on the linked Stream Profile. Changing this setting updates all existing channels on the next Check Now."
+        },
+        {
           "id": "include_vods",
           "label": "Include VODs",
           "type": "boolean",

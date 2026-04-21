@@ -60,6 +60,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'add_manual' => $this->handleAddManual($payload, $context),
             'cleanup' => $this->handleCleanup($context),
             'reset_all' => $this->handleResetAll($context),
+            'test_url' => $this->handleTestUrl($payload, $context),
             default => PluginActionResult::failure("Unknown action: {$action}"),
         };
     }
@@ -107,9 +108,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         $this->epgMode = $this->resolveEpgMode($settings);
         $channelEntries = $this->parseMonitoredChannels($settings['monitored_channels'] ?? '');
+        $youTubeUrls = $this->parseMonitoredYouTubeUrls($settings['monitored_channels'] ?? '');
 
-        if (empty($channelEntries)) {
-            return PluginActionResult::failure('No channels configured. Add Twitch usernames to Monitored Channels.');
+        if (empty($channelEntries) && empty($youTubeUrls)) {
+            return PluginActionResult::failure('No channels configured. Add Twitch usernames or YouTube URLs to Monitored Channels.');
         }
 
         $useApi = $this->hasTwitchApiCredentials($settings);
@@ -125,6 +127,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $cleaned = 0;
         $errors = [];
         $cookiesFile = $this->getCookiesFile($profile);
+        $streamlink = null;
 
         // --- Heal group assignments for all existing streamarr channels ---
         // This runs unconditionally so channels whose streams are currently offline
@@ -144,38 +147,40 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $entryMap[strtolower($entry['login'])] = $entry;
         }
 
-        // --- Detect live streams ---
+        // --- Detect Twitch live streams ---
         $liveStreams = [];
         $userProfiles = [];
 
-        if ($useApi) {
-            $context->info('Using Twitch Helix API for batch detection ('.count($logins).' channel(s))');
+        if (! empty($logins)) {
+            if ($useApi) {
+                $context->info('Using Twitch Helix API for batch detection ('.count($logins).' channel(s))');
 
-            $this->accessToken = $this->getAppAccessToken($settings);
-            if (! $this->accessToken) {
-                $this->cleanupCookiesFile($cookiesFile);
+                $this->accessToken = $this->getAppAccessToken($settings);
+                if (! $this->accessToken) {
+                    $this->cleanupCookiesFile($cookiesFile);
 
-                return PluginActionResult::failure('Failed to obtain Twitch API access token. Check your Client ID and Client Secret.');
-            }
+                    return PluginActionResult::failure('Failed to obtain Twitch API access token. Check your Client ID and Client Secret.');
+                }
 
-            $userProfiles = $this->batchGetUsers($settings, $logins);
-            $liveStreams = $this->batchGetStreams($settings, $logins);
-        } else {
-            $streamlink = $this->findStreamlink();
-            if (! $streamlink) {
-                $this->cleanupCookiesFile($cookiesFile);
+                $userProfiles = $this->batchGetUsers($settings, $logins);
+                $liveStreams = $this->batchGetStreams($settings, $logins);
+            } else {
+                $streamlink = $this->findStreamlink();
+                if (! $streamlink) {
+                    $this->cleanupCookiesFile($cookiesFile);
 
-                return PluginActionResult::failure('streamlink binary not found and no Twitch API credentials configured. Install streamlink or add API credentials.');
-            }
+                    return PluginActionResult::failure('streamlink binary not found and no Twitch API credentials configured. Install streamlink or add API credentials.');
+                }
 
-            $context->info('Using streamlink fallback for '.count($logins).' channel(s)');
+                $context->info('Using streamlink fallback for '.count($logins).' channel(s)');
 
-            foreach ($logins as $i => $login) {
-                $context->heartbeat("Checking {$login}…", progress: (int) (5 + ($i / count($logins)) * 60));
-                $streamInfo = $this->checkChannelLiveViaStreamlink($streamlink, $login, $cookiesFile);
+                foreach ($logins as $i => $login) {
+                    $context->heartbeat("Checking {$login}…", progress: (int) (5 + ($i / count($logins)) * 60));
+                    $streamInfo = $this->checkChannelLiveViaStreamlink($streamlink, $login, $cookiesFile);
 
-                if ($streamInfo) {
-                    $liveStreams[] = $streamInfo;
+                    if ($streamInfo) {
+                        $liveStreams[] = $streamInfo;
+                    }
                 }
             }
         }
@@ -194,7 +199,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $context->heartbeat('Processing live streams…', progress: 70);
 
         // --- Ensure EPG source for programme guide ---
-        $this->ensureEpgSource($userId);
+        try {
+            $this->ensureEpgSource($userId);
+        } catch (\Throwable $e) {
+            $this->epgSource = null;
+            $context->warning('EPG initialization failed, continuing without EPG data.');
+            $errors[] = 'EPG init: '.$e->getMessage();
+        }
 
         // --- Process live streams ---
         foreach ($liveStreams as $stream) {
@@ -209,13 +220,18 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             if ($existing) {
                 // Ensure EPG channel is linked for programme guide
                 if (! $existing->epg_channel_id && $this->epgSource) {
-                    $logo = $stream['profile_image'] ?: ($userProfiles[$login]['profile_image'] ?? '');
-                    $epgChannel = $this->ensureEpgChannel($this->epgSource, $userId, $login, [
-                        'display_name' => $stream['display_name'] ?? $login,
-                        'logo' => $logo,
-                        'language' => $stream['language'] ?? '',
-                    ]);
-                    $existing->update(['epg_channel_id' => $epgChannel->id]);
+                    try {
+                        $logo = $stream['profile_image'] ?: ($userProfiles[$login]['profile_image'] ?? '');
+                        $epgChannel = $this->ensureEpgChannel($this->epgSource, $userId, $login, [
+                            'display_name' => $stream['display_name'] ?? $login,
+                            'logo' => $logo,
+                            'language' => $stream['language'] ?? '',
+                        ]);
+                        $existing->update(['epg_channel_id' => $epgChannel->id]);
+                    } catch (\Throwable $e) {
+                        $context->warning("{$login}: failed to sync EPG channel, continuing.");
+                        $errors[] = "{$login} EPG sync: {$e->getMessage()}";
+                    }
                 }
 
                 if ($this->updateExistingChannel($existing, $stream, $settings, $userId, $userProfiles)) {
@@ -232,12 +248,19 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $baseNumber = $entry['base_number'] ?? null;
             $channelNumber = $this->nextChannelNumber($userId, $settings, $login, $baseNumber);
             $logo = $stream['profile_image'] ?: ($userProfiles[$login]['profile_image'] ?? '');
+            $streamTitle = trim((string) ($stream['title'] ?? "{$login} - Live"));
+            $channelTitle = $this->resolveLiveChannelTitle([
+                'login' => $login,
+                'display_name' => $stream['display_name'] ?? $login,
+                'title' => $streamTitle,
+            ], $settings);
 
             $metadata = [
                 'login' => $login,
                 'display_name' => $stream['display_name'] ?? $login,
                 'user_id' => $stream['user_id'] ?? ($userProfiles[$login]['user_id'] ?? ''),
-                'title' => $stream['title'] ?? "{$login} - Live",
+                'title' => $channelTitle,
+                'stream_title' => $streamTitle,
                 'game' => $stream['game'] ?? '',
                 'game_box_art' => $stream['game_box_art'] ?? '',
                 'stream_started' => $stream['started_at'] ?? Carbon::now()->toISOString(),
@@ -248,8 +271,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
             // Create EPG channel for programme guide
             if ($this->epgSource) {
-                $epgChannel = $this->ensureEpgChannel($this->epgSource, $userId, $login, $metadata);
-                $metadata['epg_channel_id'] = $epgChannel->id;
+                try {
+                    $epgChannel = $this->ensureEpgChannel($this->epgSource, $userId, $login, $metadata);
+                    $metadata['epg_channel_id'] = $epgChannel->id;
+                } catch (\Throwable $e) {
+                    $context->warning("{$login}: failed to create EPG channel, continuing.");
+                    $errors[] = "{$login} EPG create: {$e->getMessage()}";
+                }
             }
 
             try {
@@ -287,6 +315,17 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                         ->first();
 
                     if ($existing) {
+                        $expectedExtension = $this->resolveContainerExtension($settings, true);
+                        if ($existing->container_extension !== $expectedExtension) {
+                            $vodMovieData = $existing->movie_data ?? [];
+                            if (! empty($vodMovieData)) {
+                                $vodMovieData['container_extension'] = $expectedExtension;
+                            }
+                            $existing->update([
+                                'container_extension' => $expectedExtension,
+                                'movie_data' => $vodMovieData ?: null,
+                            ]);
+                        }
                         $skipped++;
 
                         continue;
@@ -322,6 +361,38 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $context->warning('VOD discovery requires Twitch API credentials - skipping VODs.');
         }
 
+        // --- YouTube Live Streams ---
+        if (! empty($youTubeUrls)) {
+            $streamlink = $streamlink ?? $this->findStreamlink();
+
+            if (! $streamlink) {
+                $context->warning('streamlink not found — YouTube live streams cannot be checked. Install streamlink to enable YouTube monitoring.');
+            } else {
+                $context->heartbeat('Checking YouTube live streams…', progress: 83);
+
+                foreach ($youTubeUrls as $ytUrl) {
+                    $context->heartbeat("Checking YouTube: {$ytUrl}…");
+                    $ytInfo = $this->checkYouTubeLiveViaStreamlink($streamlink, $ytUrl, $cookiesFile);
+
+                    if ($ytInfo) {
+                        try {
+                            $wasNew = $this->createOrUpdateYouTubeChannel($ytInfo, $settings, $userId, $context);
+                            if ($wasNew) {
+                                $added++;
+                            } else {
+                                $updated++;
+                            }
+                        } catch (\Throwable $e) {
+                            $context->error("YouTube {$ytUrl}: failed - {$e->getMessage()}");
+                            $errors[] = "YouTube {$ytUrl}: {$e->getMessage()}";
+                        }
+                    } else {
+                        $context->info("YouTube not live: {$ytUrl}");
+                    }
+                }
+            }
+        }
+
         // --- Cleanup ---
         if ($settings['auto_cleanup'] ?? true) {
             $context->heartbeat('Cleaning up ended streams…', progress: 90);
@@ -333,7 +404,12 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         // Write EPG programme data for all live channels
         if ($this->epgSource) {
-            $this->writeEpgData($userId);
+            try {
+                $this->writeEpgData($userId);
+            } catch (\Throwable $e) {
+                $context->warning('EPG write failed, channels were still processed.');
+                $errors[] = 'EPG write: '.$e->getMessage();
+            }
         }
         $this->epgSource = null;
         $this->epgMode = 'game';
@@ -475,11 +551,18 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 }
 
                 $channelNumber = $this->nextChannelNumber($userId, $settings, $login, null);
+                $streamTitle = trim((string) ($streamInfo['title'] ?? "{$login} - Live"));
+                $channelTitle = $this->resolveLiveChannelTitle([
+                    'login' => $login,
+                    'display_name' => $streamInfo['display_name'] ?? $login,
+                    'title' => $streamTitle,
+                ], $settings);
                 $metadata = [
                     'login' => $login,
                     'display_name' => $streamInfo['display_name'] ?? $login,
                     'user_id' => $streamInfo['user_id'] ?? ($userProfile['user_id'] ?? ''),
-                    'title' => $streamInfo['title'] ?? "{$login} - Live",
+                    'title' => $channelTitle,
+                    'stream_title' => $streamTitle,
                     'game' => $streamInfo['game'] ?? '',
                     'game_box_art' => $streamInfo['game_box_art'] ?? '',
                     'stream_started' => $streamInfo['started_at'] ?? Carbon::now()->toISOString(),
@@ -489,9 +572,14 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 ];
 
                 // Create EPG channel for programme guide
-                $epg = $this->ensureEpgSource($userId);
-                $epgChannel = $this->ensureEpgChannel($epg, $userId, $login, $metadata);
-                $metadata['epg_channel_id'] = $epgChannel->id;
+                try {
+                    $epg = $this->ensureEpgSource($userId);
+                    $epgChannel = $this->ensureEpgChannel($epg, $userId, $login, $metadata);
+                    $metadata['epg_channel_id'] = $epgChannel->id;
+                } catch (\Throwable $e) {
+                    $context->warning("{$login}: failed to create EPG channel, continuing.");
+                    $errors[] = "{$login} EPG create: {$e->getMessage()}";
+                }
 
                 try {
                     $this->createChannel($metadata, self::STREAM_TYPE_LIVE, $settings, $userId, $channelNumber);
@@ -571,8 +659,14 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         // Write EPG programme data
         if ($this->epgSource) {
-            $this->writeEpgData($userId);
-            $this->epgSource = null;
+            try {
+                $this->writeEpgData($userId);
+            } catch (\Throwable $e) {
+                $context->warning('EPG write failed, manual add still completed.');
+                $errors[] = 'EPG write: '.$e->getMessage();
+            } finally {
+                $this->epgSource = null;
+            }
         }
 
         $parts = [];
@@ -594,6 +688,70 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         return $added > 0
             ? PluginActionResult::success($summary)
             : PluginActionResult::failure($summary);
+    }
+
+    private function handleTestUrl(array $payload, PluginExecutionContext $context): PluginActionResult
+    {
+        $url = trim($payload['url'] ?? '');
+
+        if ($url === '') {
+            return PluginActionResult::failure('No URL provided.');
+        }
+
+        ['profile' => $profile] = $this->resolveContext($context);
+
+        $streamlink = $this->findStreamlink();
+
+        if (! $streamlink) {
+            return PluginActionResult::failure('streamlink binary not found. Install streamlink to use URL testing.');
+        }
+
+        $cookiesFile = $this->getCookiesFile($profile);
+
+        try {
+            $cmd = [$streamlink, '--json', $url];
+
+            if ($cookiesFile && is_file($cookiesFile)) {
+                $cmd[] = '--http-cookies-file';
+                $cmd[] = $cookiesFile;
+            }
+
+            $context->info("Running: streamlink --json {$url}");
+            $result = $this->runProcess($cmd, 45);
+
+            $json = $result['stdout'] ? json_decode($result['stdout'], true) : null;
+            $isLive = is_array($json) && ! isset($json['error']) && isset($json['streams']);
+            $streams = is_array($json) ? array_keys($json['streams'] ?? []) : [];
+            $metadata = is_array($json) ? ($json['metadata'] ?? []) : [];
+            $errorMsg = is_array($json) ? ($json['error'] ?? null) : null;
+            $stderr = $result['stderr'] ? substr($result['stderr'], -2000) : '';
+
+            if ($isLive) {
+                return PluginActionResult::success(
+                    "Stream is LIVE: {$url}",
+                    [
+                        'live' => true,
+                        'url' => $url,
+                        'metadata' => $metadata,
+                        'streams' => $streams,
+                        'exit_code' => $result['exit'],
+                    ]
+                );
+            }
+
+            return PluginActionResult::success(
+                "Stream is NOT live or URL not supported: {$url}" . ($errorMsg ? " — {$errorMsg}" : ''),
+                [
+                    'live' => false,
+                    'url' => $url,
+                    'error' => $errorMsg,
+                    'stderr_tail' => $stderr,
+                    'exit_code' => $result['exit'],
+                ]
+            );
+        } finally {
+            $this->cleanupCookiesFile($cookiesFile);
+        }
     }
 
     private function handleCleanup(PluginExecutionContext $context): PluginActionResult
@@ -618,8 +776,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $this->accessToken = null;
 
         // Rewrite EPG data after removing ended streams
-        $this->writeEpgData($userId);
-        $this->epgSource = null;
+        try {
+            $this->writeEpgData($userId);
+        } catch (\Throwable $e) {
+            $context->warning('EPG rewrite failed after cleanup, cleanup itself succeeded.');
+        } finally {
+            $this->epgSource = null;
+        }
 
         return PluginActionResult::success("Removed {$cleaned} ended channel(s).", ['cleaned' => $cleaned]);
     }
@@ -665,6 +828,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      * Normalize EPG mode from plugin settings.
      * Maps legacy/alternate values to either "game" or "title".
      */
+    private function resolveContainerExtension(array $settings, bool $isVod): ?string
+    {
+        if (($settings['output_format'] ?? 'ts') === 'hls') {
+            return 'm3u8';
+        }
+
+        return $isVod ? 'ts' : null;
+    }
+
     private function resolveEpgMode(array $settings): string
     {
         $rawMode = strtolower(trim((string) ($settings['epg_mode'] ?? 'game')));
@@ -675,12 +847,62 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         };
     }
 
+    /**
+     * Normalize live channel title mode from plugin settings.
+     * Maps legacy/alternate values to either "stream_title" or "channel_name".
+     */
+    private function resolveLiveChannelTitleMode(array $settings): string
+    {
+        $rawMode = strtolower(trim((string) ($settings['live_channel_title_mode'] ?? 'stream_title')));
+
+        return match ($rawMode) {
+            'channel', 'channel_name', 'channel-name', 'name', 'display_name', 'display-name' => 'channel_name',
+            default => 'stream_title',
+        };
+    }
+
+    /**
+     * Build the channel title for live streams based on configured title mode.
+     *
+     * @param  array{login?: string, display_name?: string, title?: string}  $stream
+     */
+    private function resolveLiveChannelTitle(array $stream, array $settings): string
+    {
+        $mode = $this->resolveLiveChannelTitleMode($settings);
+
+        $login = trim((string) ($stream['login'] ?? ''));
+        $displayName = trim((string) ($stream['display_name'] ?? ''));
+        $streamTitle = trim((string) ($stream['title'] ?? ''));
+
+        if ($mode === 'channel_name') {
+            if ($displayName !== '') {
+                return $displayName;
+            }
+
+            if ($login !== '') {
+                return $login;
+            }
+
+            return $streamTitle;
+        }
+
+        if ($streamTitle !== '') {
+            return $streamTitle;
+        }
+
+        if ($displayName !== '') {
+            return $displayName;
+        }
+
+        return $login;
+    }
+
     // -------------------------------------------------------------------------
     // Channel lifecycle
     // -------------------------------------------------------------------------
 
     /**
-     * @param  array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, logo: string, thumbnail: string, language?: string, vod_id?: string, vod_data?: array}  $metadata
+     * @param  array{login: string, display_name: string, user_id: string, title: string, game: string, game_box_art: string, logo: string, thumbnail: string, language?: string, stream_title?: string, vod_id?: string, vod_data?: array}  $metadata
      */
     private function createChannel(
         array $metadata,
@@ -705,12 +927,23 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $channelTitle = $this->sanitizeXtreamText((string) ($metadata['title'] ?? ''), $settings);
         $channelName = $this->sanitizeXtreamText((string) ($metadata['display_name'] ?? $login), $settings);
 
+        if ($channelName === '') {
+            $channelName = $this->sanitizeXtreamText($login, $settings);
+            if ($channelName === '') {
+                $channelName = $login;
+            }
+        }
+
+        if ($channelTitle === '') {
+            $channelTitle = $channelName;
+        }
+
         $group = $this->resolveOrCreateGroup($groupName, $userId, $playlistId, $customPlaylistId);
 
         $customPlaylist = $customPlaylistId ? CustomPlaylist::find($customPlaylistId) : null;
 
         $groupTag = null;
-        if ($customPlaylist) {
+        if ($customPlaylist && ! empty($customPlaylist->uuid)) {
             $groupTag = $customPlaylist->groupTags()->where('name->en', $groupName)->first();
             if (! $groupTag) {
                 $groupTag = Tag::create(['name' => ['en' => $groupName], 'type' => $customPlaylist->uuid]);
@@ -728,15 +961,17 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         // Initialize EPG history for live channels
         if (! $isVod) {
+            $rawStreamTitle = trim((string) ($metadata['stream_title'] ?? $metadata['title'] ?? ''));
+
             $info['twitch_epg_history'] = [[
                 'game' => $metadata['game'] ?? '',
                 'game_box_art' => $metadata['game_box_art'] ?? '',
                 'started_at' => Carbon::now()->toISOString(),
             ]];
-            $info['twitch_title'] = $metadata['title'] ?? '';
+            $info['twitch_title'] = $rawStreamTitle;
             $info['twitch_stream_started'] = $metadata['stream_started'] ?? Carbon::now()->toISOString();
             $info['twitch_title_history'] = [[
-                'title' => $metadata['title'] ?? '',
+                'title' => $rawStreamTitle,
                 'started_at' => $metadata['stream_started'] ?? Carbon::now()->toISOString(),
             ]];
         }
@@ -801,7 +1036,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 'added' => $addedTimestamp ?: (string) time(),
                 'category_id' => (string) ($group?->id ?? ''),
                 'category_ids' => $group ? [$group->id] : [],
-                'container_extension' => 'ts',
+                'container_extension' => $this->resolveContainerExtension($settings, true),
                 'custom_sid' => '',
                 'direct_source' => '',
             ];
@@ -812,7 +1047,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'name' => $channelName,
             'title' => $channelTitle,
             'url' => $url,
-            'channel' => (int) $channelNumber,
+            'channel' => $channelNumber,
             'sort' => (float) $channelNumber,
             'stream_id' => 'streamarr-'.$login,
             'epg_channel_id' => $metadata['epg_channel_id'] ?? null,
@@ -832,7 +1067,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'info' => $info,
-            'container_extension' => $isVod ? 'ts' : null,
+            'container_extension' => $this->resolveContainerExtension($settings, $isVod),
             'year' => $year,
             'movie_data' => $movieData,
         ]);
@@ -888,9 +1123,18 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             }
         }
 
-        $previousTitle = trim((string) ($info['twitch_title'] ?? $channel->title ?? ''));
-        $newTitle = $stream['title'] ?? '';
-        $sanitizedTitle = $this->sanitizeXtreamText((string) $newTitle, $settings);
+        $previousTitle = trim((string) ($info['twitch_title'] ?? ''));
+        if ($previousTitle === '') {
+            $previousTitle = trim((string) ($stream['title'] ?? $channel->title ?? ''));
+        }
+
+        $newTitle = trim((string) ($stream['title'] ?? ''));
+        $liveChannelTitle = $this->resolveLiveChannelTitle([
+            'login' => (string) ($stream['login'] ?? data_get($info, 'twitch_login', '')),
+            'display_name' => (string) ($stream['display_name'] ?? $channel->name ?? ''),
+            'title' => $newTitle,
+        ], $settings);
+        $sanitizedTitle = $this->sanitizeXtreamText($liveChannelTitle, $settings);
         if ($sanitizedTitle && $sanitizedTitle !== $channel->title) {
             $channel->title = $sanitizedTitle;
             $changed = true;
@@ -922,7 +1166,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $changed = true;
         }
 
-        $normalizedNewTitle = trim((string) $newTitle);
+        $normalizedNewTitle = $newTitle;
         $titleHistory = $info['twitch_title_history'] ?? [];
         $lastTitle = '';
         if (! empty($titleHistory)) {
@@ -1017,7 +1261,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $groupMode = $settings['group_mode'] ?? 'static';
         if ($groupMode === 'game' && $newGame !== $oldGame && $newGame !== '' && $customPlaylistId) {
             $customPlaylist = CustomPlaylist::find($customPlaylistId);
-            if ($customPlaylist) {
+            if ($customPlaylist && ! empty($customPlaylist->uuid)) {
                 if ($oldGame) {
                     $oldTag = $customPlaylist->groupTags()->where('name->en', $oldGame)->first();
                     if ($oldTag) {
@@ -1034,6 +1278,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             }
         }
 
+        // Sync container_extension with current output_format setting.
+        $expectedExtension = $this->resolveContainerExtension($settings, false);
+        if ($channel->container_extension !== $expectedExtension) {
+            $channel->container_extension = $expectedExtension;
+            $changed = true;
+        }
+
         if ($changed) {
             $channel->info = $info;
             $channel->save();
@@ -1048,59 +1299,166 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         ?string $cookiesFile,
         PluginExecutionContext $context,
     ): int {
+        $cleaned = 0;
+        $streamlink = null;
+
+        // --- Cleanup ended Twitch live streams ---
         /** @var Collection<int, Channel> $channels */
         $channels = Channel::where('user_id', $userId)
             ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
             ->whereJsonContains('info->twitch_stream_type', self::STREAM_TYPE_LIVE)
             ->get();
 
-        if ($channels->isEmpty()) {
-            return 0;
+        if ($channels->isNotEmpty()) {
+            $useApi = $this->hasTwitchApiCredentials($settings) && $this->accessToken;
+
+            if ($useApi) {
+                // Batch check - very efficient
+                $logins = $channels->map(fn (Channel $ch) => data_get($ch->info, 'twitch_login'))->filter()->unique()->values()->all();
+                $liveStreams = $this->batchGetStreams($settings, $logins);
+                $liveLogins = collect($liveStreams)->pluck('login')->map(fn ($l) => strtolower($l))->all();
+
+                foreach ($channels as $channel) {
+                    $login = strtolower(data_get($channel->info, 'twitch_login', ''));
+
+                    if (! in_array($login, $liveLogins, true)) {
+                        $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') - removing.");
+                        $channel->delete();
+                        $cleaned++;
+                    }
+                }
+            } else {
+                $streamlink = $streamlink ?? $this->findStreamlink();
+                if (! $streamlink) {
+                    $context->warning('Cannot check Twitch stream status - streamlink not found.');
+                } else {
+                    foreach ($channels as $channel) {
+                        $login = data_get($channel->info, 'twitch_login', '');
+                        if (! $login) {
+                            continue;
+                        }
+
+                        $streamInfo = $this->checkChannelLiveViaStreamlink($streamlink, $login, $cookiesFile);
+
+                        if (! $streamInfo) {
+                            $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') - removing.");
+                            $channel->delete();
+                            $cleaned++;
+                        }
+                    }
+                }
+            }
         }
 
-        $useApi = $this->hasTwitchApiCredentials($settings) && $this->accessToken;
-        $cleaned = 0;
+        // --- Cleanup ended YouTube live streams ---
+        /** @var Collection<int, Channel> $ytChannels */
+        $ytChannels = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
+            ->get();
 
-        if ($useApi) {
-            // Batch check - very efficient
-            $logins = $channels->map(fn (Channel $ch) => data_get($ch->info, 'twitch_login'))->filter()->unique()->values()->all();
-            $liveStreams = $this->batchGetStreams($settings, $logins);
-            $liveLogins = collect($liveStreams)->pluck('login')->map(fn ($l) => strtolower($l))->all();
+        if ($ytChannels->isNotEmpty()) {
+            $streamlink = $streamlink ?? $this->findStreamlink();
 
-            foreach ($channels as $channel) {
-                $login = strtolower(data_get($channel->info, 'twitch_login', ''));
-
-                if (! in_array($login, $liveLogins, true)) {
-                    $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') - removing.");
-                    $channel->delete();
-                    $cleaned++;
-                }
-            }
-        } else {
-            $streamlink = $this->findStreamlink();
             if (! $streamlink) {
-                $context->warning('Cannot check stream status - streamlink not found.');
+                $context->warning('Cannot check YouTube stream status - streamlink not found.');
+            } else {
+                foreach ($ytChannels as $channel) {
+                    $ytUrl = data_get($channel->info, 'youtube_monitored_url', '');
+                    if (! $ytUrl) {
+                        continue;
+                    }
 
-                return 0;
-            }
+                    $ytInfo = $this->checkYouTubeLiveViaStreamlink($streamlink, $ytUrl, $cookiesFile);
 
-            foreach ($channels as $channel) {
-                $login = data_get($channel->info, 'twitch_login', '');
-                if (! $login) {
-                    continue;
-                }
-
-                $streamInfo = $this->checkChannelLiveViaStreamlink($streamlink, $login, $cookiesFile);
-
-                if (! $streamInfo) {
-                    $context->info("Stream ended for {$login} (channel #{$channel->channel} '{$channel->title}') - removing.");
-                    $channel->delete();
-                    $cleaned++;
+                    if (! $ytInfo) {
+                        $context->info("YouTube stream ended: {$ytUrl} (channel #{$channel->channel} '{$channel->title}') - removing.");
+                        $channel->delete();
+                        $cleaned++;
+                    }
                 }
             }
         }
 
         return $cleaned;
+    }
+
+    /**
+     * Create or update a channel for a live YouTube stream.
+     *
+     * @param  array{url: string, title: string, author: string, category: string, id: string}  $ytInfo
+     * @return bool True if a new channel was created, false if an existing one was updated.
+     */
+    private function createOrUpdateYouTubeChannel(
+        array $ytInfo,
+        array $settings,
+        int $userId,
+        PluginExecutionContext $context,
+    ): bool {
+        $monitoredUrl = $ytInfo['url'];
+        $group = $settings['youtube_group'] ?? 'YouTube Live';
+
+        /** @var Channel|null $existing */
+        $existing = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->whereJsonContains('info->youtube_monitored_url', $monitoredUrl)
+            ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
+            ->first();
+
+        $title = $ytInfo['title'] ?: ($ytInfo['author'] ?: 'YouTube Live');
+
+        if ($existing) {
+            $info = $existing->info ?? [];
+            $info['youtube_title'] = $ytInfo['title'];
+            $info['youtube_author'] = $ytInfo['author'];
+            $info['youtube_category'] = $ytInfo['category'];
+
+            $existing->title = $title;
+            $existing->info = $info;
+            $existing->save();
+
+            $context->info("YouTube updated: {$monitoredUrl} — '{$title}'");
+
+            return false;
+        }
+
+        // Create the group if needed
+        /** @var \App\Models\Group $groupModel */
+        $groupModel = \App\Models\Group::firstOrCreate(
+            ['user_id' => $userId, 'name' => $group],
+            ['user_id' => $userId, 'name' => $group],
+        );
+
+        $channelNumber = $this->nextChannelNumber($userId, $settings, 'youtube', null);
+
+        $info = [
+            'plugin' => self::PLUGIN_MARKER,
+            'youtube_stream_type' => self::STREAM_TYPE_LIVE,
+            'youtube_monitored_url' => $monitoredUrl,
+            'youtube_title' => $ytInfo['title'],
+            'youtube_author' => $ytInfo['author'],
+            'youtube_category' => $ytInfo['category'],
+            'youtube_id' => $ytInfo['id'],
+        ];
+
+        // Resolve the stream URL for the channel (use the monitored URL directly;
+        // m3u-proxy / streamlink will resolve the actual HLS stream on connection).
+        $streamUrl = $monitoredUrl;
+
+        $channel = Channel::create([
+            'user_id' => $userId,
+            'title' => $title,
+            'name' => $title,
+            'url' => $streamUrl,
+            'group_id' => $groupModel->id,
+            'channel' => $channelNumber,
+            'is_active' => true,
+            'info' => $info,
+        ]);
+
+        $context->info("YouTube added: {$monitoredUrl} — '{$title}' (ch #{$channel->channel})");
+
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -1140,7 +1498,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             ->value('channel');
 
         if ($last === null) {
-            if ($xtreamCompat && $starting > $xtreamMax) {
+            if ($xtreamCompat && ($starting < $xtreamMin || $starting > $xtreamMax)) {
                 $fallback = $this->findNextFreeChannelNumber($userId, $xtreamMin, $xtreamMax);
                 if ($fallback !== null) {
                     return $fallback;
@@ -1152,7 +1510,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         $candidate = (int) $last + $increment;
 
-        if ($xtreamCompat && $candidate > $xtreamMax) {
+        if ($xtreamCompat && ($candidate < $xtreamMin || $candidate > $xtreamMax)) {
             $fallback = $this->findNextFreeChannelNumber($userId, $xtreamMin, $xtreamMax);
             if ($fallback !== null) {
                 return $fallback;
@@ -1201,6 +1559,23 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         return ! empty($settings['twitch_client_id']) && ! empty($settings['twitch_client_secret']);
     }
 
+    private function twitchApiRequest(array $settings)
+    {
+        return Http::retry(2, 250, throw: false)
+            ->timeout(20)
+            ->withHeaders([
+                'Client-ID' => $settings['twitch_client_id'],
+                'Authorization' => "Bearer {$this->accessToken}",
+            ]);
+    }
+
+    private function twitchTokenRequest()
+    {
+        return Http::retry(2, 250, throw: false)
+            ->timeout(20)
+            ->asForm();
+    }
+
     /**
      * Obtain an App Access Token via client_credentials grant.
      */
@@ -1210,7 +1585,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return $this->accessToken;
         }
 
-        $response = Http::asForm()->post('https://id.twitch.tv/oauth2/token', [
+        $response = $this->twitchTokenRequest()->post('https://id.twitch.tv/oauth2/token', [
             'client_id' => $settings['twitch_client_id'],
             'client_secret' => $settings['twitch_client_secret'],
             'grant_type' => 'client_credentials',
@@ -1237,10 +1612,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         foreach (array_chunk($logins, 100) as $chunk) {
             $query = collect($chunk)->map(fn ($l) => "login={$l}")->implode('&');
 
-            $response = Http::withHeaders([
-                'Client-ID' => $settings['twitch_client_id'],
-                'Authorization' => "Bearer {$this->accessToken}",
-            ])->get("https://api.twitch.tv/helix/users?{$query}");
+            $response = $this->twitchApiRequest($settings)
+                ->get("https://api.twitch.tv/helix/users?{$query}");
 
             if (! $response->successful()) {
                 continue;
@@ -1282,10 +1655,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         foreach (array_chunk($logins, 100) as $chunk) {
             $query = collect($chunk)->map(fn ($l) => "user_login={$l}")->implode('&');
 
-            $response = Http::withHeaders([
-                'Client-ID' => $settings['twitch_client_id'],
-                'Authorization' => "Bearer {$this->accessToken}",
-            ])->get("https://api.twitch.tv/helix/streams?{$query}");
+            $response = $this->twitchApiRequest($settings)
+                ->get("https://api.twitch.tv/helix/streams?{$query}");
 
             if (! $response->successful()) {
                 continue;
@@ -1330,10 +1701,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      */
     private function getChannelVideos(array $settings, string $twitchUserId, int $limit): array
     {
-        $response = Http::withHeaders([
-            'Client-ID' => $settings['twitch_client_id'],
-            'Authorization' => "Bearer {$this->accessToken}",
-        ])->get("https://api.twitch.tv/helix/videos", [
+        $response = $this->twitchApiRequest($settings)->get("https://api.twitch.tv/helix/videos", [
             'user_id' => $twitchUserId,
             'type' => 'archive',
             'first' => min($limit, 100),
@@ -1384,10 +1752,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      */
     private function getVideoById(array $settings, string $videoId): ?array
     {
-        $response = Http::withHeaders([
-            'Client-ID' => $settings['twitch_client_id'],
-            'Authorization' => "Bearer {$this->accessToken}",
-        ])->get('https://api.twitch.tv/helix/videos', [
+        $response = $this->twitchApiRequest($settings)->get('https://api.twitch.tv/helix/videos', [
             'id' => $videoId,
         ]);
 
@@ -1444,9 +1809,9 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $url = "https://www.twitch.tv/{$login}";
         $cmd = [$binary, '--json', $url];
 
-        if ($cookiesFile) {
-            $cmd[] = '--twitch-api-header';
-            $cmd[] = "Cookie=$(cat {$cookiesFile})";
+        if ($cookiesFile && is_file($cookiesFile)) {
+            $cmd[] = '--http-cookies-file';
+            $cmd[] = $cookiesFile;
         }
 
         $result = $this->runProcess($cmd, 30);
@@ -1499,6 +1864,48 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         return null;
     }
 
+    /**
+     * Check if a YouTube URL is live using streamlink --json.
+     * Cookies are passed via --http-cookies-file when a Netscape cookie file is provided.
+     *
+     * @return array{url: string, title: string, author: string, category: string, id: string}|null
+     */
+    private function checkYouTubeLiveViaStreamlink(string $binary, string $url, ?string $cookiesFile): ?array
+    {
+        $cmd = [$binary, '--json', $url];
+
+        if ($cookiesFile && is_file($cookiesFile)) {
+            $cmd[] = '--http-cookies-file';
+            $cmd[] = $cookiesFile;
+        }
+
+        $result = $this->runProcess($cmd, 30);
+
+        if ($result['exit'] !== 0 || empty($result['stdout'])) {
+            return null;
+        }
+
+        $json = json_decode($result['stdout'], true);
+        if (! is_array($json)) {
+            return null;
+        }
+
+        // streamlink --json returns {"error": "..."} when not live / not found
+        if (isset($json['error'])) {
+            return null;
+        }
+
+        $metadata = $json['metadata'] ?? [];
+
+        return [
+            'url' => $url,
+            'title' => $metadata['title'] ?? '',
+            'author' => $metadata['author'] ?? '',
+            'category' => $metadata['category'] ?? '',
+            'id' => $metadata['id'] ?? '',
+        ];
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
@@ -1508,6 +1915,19 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      */
     private function parseTwitchDuration(string $duration): int
     {
+        $duration = trim($duration);
+        if ($duration === '') {
+            return 0;
+        }
+
+        if (preg_match('/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i', $duration, $m)) {
+            $hours = isset($m[1]) ? (int) $m[1] : 0;
+            $minutes = isset($m[2]) ? (int) $m[2] : 0;
+            $secs = isset($m[3]) ? (int) $m[3] : 0;
+
+            return ($hours * 3600) + ($minutes * 60) + $secs;
+        }
+
         $seconds = 0;
 
         if (preg_match('/(\d+)h/', $duration, $m)) {
@@ -1726,14 +2146,38 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         foreach ($channels as $channel) {
             $changed = false;
+            $channelInfo = is_array($channel->info) ? $channel->info : [];
+            $fallbackLogin = trim((string) ($channelInfo['twitch_login'] ?? ''));
+            $fallbackDisplayName = trim((string) ($channelInfo['twitch_display_name'] ?? ''));
+            $fallbackName = $fallbackDisplayName !== '' ? $fallbackDisplayName : $fallbackLogin;
+            if ($fallbackName === '') {
+                $fallbackName = 'streamarr-'.$channel->id;
+            }
+
+            $fallbackTitle = trim((string) ($channelInfo['twitch_title'] ?? ''));
+            if ($fallbackTitle === '') {
+                $fallbackTitle = $fallbackName;
+            }
 
             $safeTitle = $this->sanitizeXtreamText((string) ($channel->title ?? ''), $settings);
+            if ($safeTitle === '') {
+                $safeTitle = $this->sanitizeXtreamText($fallbackTitle, $settings);
+            }
+            if ($safeTitle === '') {
+                $safeTitle = $fallbackTitle;
+            }
             if ($safeTitle !== '' && $safeTitle !== $channel->title) {
                 $channel->title = $safeTitle;
                 $changed = true;
             }
 
             $safeName = $this->sanitizeXtreamText((string) ($channel->name ?? ''), $settings);
+            if ($safeName === '') {
+                $safeName = $this->sanitizeXtreamText($fallbackName, $settings);
+            }
+            if ($safeName === '') {
+                $safeName = $fallbackName;
+            }
             if ($safeName !== '' && $safeName !== $channel->name) {
                 $channel->name = $safeName;
                 $changed = true;
@@ -1835,11 +2279,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     }
 
     /**
-     * Parse the monitored_channels textarea into structured entries.
+     * Parse the monitored_channels textarea into structured Twitch entries.
      *
      * Supports:
      *   username
      *   username=BaseNumber
+     *
+     * YouTube URLs are skipped here; use parseMonitoredYouTubeUrls() for those.
      *
      * @return list<array{login: string, base_number: int|null}>
      */
@@ -1850,6 +2296,11 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         foreach (explode("\n", $raw) as $line) {
             $line = trim($line);
             if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            // Skip YouTube URLs — handled separately
+            if ($this->isYouTubeUrl($line)) {
                 continue;
             }
 
@@ -1872,6 +2323,60 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         return $entries;
+    }
+
+    /**
+     * Parse the monitored_channels textarea and return only YouTube URLs.
+     *
+     * @return list<string>
+     */
+    private function parseMonitoredYouTubeUrls(string $raw): array
+    {
+        $urls = [];
+
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if ($this->isYouTubeUrl($line)) {
+                $urls[] = $this->normalizeYouTubeUrl($line);
+            }
+        }
+
+        return array_values(array_unique($urls));
+    }
+
+    /**
+     * Detect whether a line is a YouTube URL.
+     */
+    private function isYouTubeUrl(string $entry): bool
+    {
+        return (bool) preg_match('#^https?://(www\.)?(youtube\.com|youtu\.be)/#i', $entry);
+    }
+
+    /**
+     * Normalize a YouTube channel URL so that it points to the live stream page.
+     *
+     * - @handle URLs  → https://www.youtube.com/@handle/live
+     * - /channel/ID   → https://www.youtube.com/channel/ID/live
+     * - /c/slug       → https://www.youtube.com/c/slug/live
+     * - URLs already ending in /live → returned as-is
+     * - youtu.be/xxx  → returned as-is (video/live ID — cannot append /live)
+     * - watch?v=      → returned as-is
+     */
+    private function normalizeYouTubeUrl(string $url): string
+    {
+        $url = trim($url);
+
+        // Already has /live or is a direct video URL
+        if (str_contains($url, '/live') || str_contains($url, 'watch?v=') || str_contains($url, 'youtu.be/')) {
+            return $url;
+        }
+
+        // Strip trailing slash before appending
+        return rtrim($url, '/').'/live';
     }
 
     /**
@@ -1913,7 +2418,12 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     private function resolveContext(PluginExecutionContext $context): array
     {
         $profile = $this->loadStreamProfile($context->settings);
-        $userId = $context->user?->id ?? $profile?->user_id;
+        $userId = $context->user?->id;
+
+        if (! $userId) {
+            $profileUserId = (int) ($profile?->user_id ?? 0);
+            $userId = $profileUserId > 0 ? $profileUserId : null;
+        }
 
         return ['userId' => $userId, 'profile' => $profile];
     }

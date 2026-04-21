@@ -1,10 +1,10 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
-  "description": "Monitor Twitch channels for livestreams & VODs, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback.",
+  "description": "Monitor Twitch channels and YouTube streams for live content, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback. Supports cookie-based authentication for age-restricted or subscriber-only streams.",
   "entrypoint": "Plugin.php",
   "class": "AppLocalPlugins\\Streamarr\\Plugin",
   "capabilities": [
@@ -32,199 +32,288 @@
   },
   "settings": [
     {
-      "id": "monitored_channels",
-      "label": "Monitored Twitch Channels",
-      "type": "textarea",
-      "default": "",
-      "required": false,
-      "helper_text": "One Twitch username per line. Format: username or username=BaseNumber (for decimal numbering). Lines starting with # are ignored.\n\nExamples:\nnightbot\npokimane=50\nmontanablack88=60\n\n⚠ Without Twitch API credentials, each channel is checked individually via streamlink. This is slow for more than ~20 channels - consider adding API credentials."
+      "id": "core_setup",
+      "type": "section",
+      "label": "Core Setup",
+      "description": "Basic Twitch monitoring and playlist assignment.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "monitored_channels",
+          "label": "Monitored Channels (Twitch & YouTube)",
+          "type": "textarea",
+          "default": "",
+          "required": false,
+          "helper_text": "One entry per line. Lines starting with # are ignored.\n\nTwitch: username or username=BaseNumber (for decimal numbering)\n  nightbot\n  pokimane=50\n\nYouTube: full URL to a live channel or stream\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\n\nYouTube detection uses streamlink and supports live streams only. Cookies from the linked Stream Profile are automatically passed to streamlink.\n\n⚠ Without Twitch API credentials, each Twitch channel is checked individually via streamlink. This is slow for more than ~20 channels."
+        },
+        {
+          "id": "stream_profile_id",
+          "label": "Stream Profile (streamlink)",
+          "type": "model_select",
+          "model": "App\\Models\\StreamProfile",
+          "label_attribute": "name",
+          "scope": "owned",
+          "required": true,
+          "helper_text": "Select a Stream Profile with the 'Streamlink' backend. FFmpeg profiles will NOT work for Twitch streams.\n\n⚠ You must first create a Stream Profile under Settings → Stream Profiles with backend set to 'Streamlink' and quality 'best'. Cookies configured on this profile will also be used for stream detection."
+        },
+        {
+          "id": "target_playlist_id",
+          "label": "Target Playlist (Standard)",
+          "type": "model_select",
+          "model": "App\\Models\\Playlist",
+          "label_attribute": "name",
+          "scope": "owned",
+          "required": false,
+          "helper_text": "Standard playlist to associate created channels with. Leave empty to skip."
+        },
+        {
+          "id": "target_custom_playlist_id",
+          "label": "Target Playlist (Custom)",
+          "type": "model_select",
+          "model": "App\\Models\\CustomPlaylist",
+          "label_attribute": "name",
+          "scope": "owned",
+          "required": false,
+          "helper_text": "Custom playlist to add created channels to. Leave empty to skip."
+        }
+      ]
     },
     {
-      "id": "stream_profile_id",
-      "label": "Stream Profile (streamlink)",
-      "type": "model_select",
-      "model": "App\\Models\\StreamProfile",
-      "label_attribute": "name",
-      "scope": "owned",
-      "required": true,
-      "helper_text": "Select a Stream Profile with the 'Streamlink' backend. FFmpeg profiles will NOT work for Twitch streams.\n\n⚠ You must first create a Stream Profile under Settings → Stream Profiles with backend set to 'Streamlink' and quality 'best'. Cookies configured on this profile will also be used for stream detection."
+      "id": "live_grouping",
+      "type": "section",
+      "label": "Live & Grouping",
+      "description": "How live channels are titled, grouped and shown in the EPG.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "group_mode",
+          "label": "Group Mode",
+          "type": "select",
+          "default": "static",
+          "options": {
+            "static": "Static (fixed group name)",
+            "game": "By Game / Category (requires Twitch API)"
+          },
+          "helper_text": "Static uses the fixed group name below. Game mode groups live channels by their current Twitch game/category (e.g. 'Just Chatting', 'Fortnite'). Game mode requires Twitch API credentials and falls back to static without them. VOD channels always use the VOD Group name."
+        },
+        {
+          "id": "channel_group",
+          "label": "Live Channel Group",
+          "type": "text",
+          "default": "Twitch Live",
+          "helper_text": "Group name for live-stream channels. Used in static mode, and as fallback in game mode when the game is unknown."
+        },
+        {
+          "id": "epg_mode",
+          "label": "EPG Mode",
+          "type": "select",
+          "default": "game",
+          "options": {
+            "game": "Game / Category (shows game changes as programme entries)",
+            "title": "Stream Title (single programme with the stream title)"
+          },
+          "helper_text": "Game mode creates a new programme entry each time the streamer switches games. Title mode shows a single continuous programme using the stream title — useful if you prefer all channels under one group with simpler EPG."
+        },
+        {
+          "id": "live_channel_title_mode",
+          "label": "Live Channel Title Mode",
+          "type": "select",
+          "default": "stream_title",
+          "options": {
+            "stream_title": "Use Stream Title",
+            "channel_name": "Use Channel Name"
+          },
+          "helper_text": "Controls the title of live channels. Stream Title uses the current Twitch stream title. Channel Name uses the Twitch channel display name."
+        },
+        {
+          "id": "vod_group",
+          "label": "VOD Group",
+          "type": "text",
+          "default": "Twitch VODs",
+          "helper_text": "Group name for VOD channels."
+        },
+        {
+          "id": "youtube_group",
+          "label": "YouTube Live Group",
+          "type": "text",
+          "default": "YouTube Live",
+          "helper_text": "Group name for YouTube live-stream channels. YouTube channels are always grouped here, regardless of Group Mode."
+        }
+      ]
     },
     {
-      "id": "target_playlist_id",
-      "label": "Target Playlist (Standard)",
-      "type": "model_select",
-      "model": "App\\Models\\Playlist",
-      "label_attribute": "name",
-      "scope": "owned",
-      "required": false,
-      "helper_text": "Standard playlist to associate created channels with. Leave empty to skip."
+      "id": "content_cleanup",
+      "type": "section",
+      "label": "Content & Cleanup",
+      "description": "Playback quality, VOD imports and cleanup behavior.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "stream_quality",
+          "label": "Stream Quality",
+          "type": "select",
+          "default": "best",
+          "options": {
+            "best": "Best Available",
+            "1080p60": "1080p 60fps",
+            "720p60": "720p 60fps",
+            "720p": "720p",
+            "480p": "480p",
+            "360p": "360p",
+            "160p": "160p",
+            "audio_only": "Audio Only"
+          },
+          "helper_text": "Preferred stream quality. Streamlink will select the closest available quality."
+        },
+        {
+          "id": "output_format",
+          "label": "Output Format",
+          "type": "select",
+          "default": "ts",
+          "options": {
+            "ts": "MPEG-TS",
+            "hls": "HLS / m3u8"
+          },
+          "helper_text": "Container format for created channels. Must match the format configured on the linked Stream Profile. Changing this setting updates all existing channels on the next Check Now."
+        },
+        {
+          "id": "include_vods",
+          "label": "Include VODs",
+          "type": "boolean",
+          "default": false,
+          "helper_text": "Also create channels for recent VODs of monitored channels. Requires Twitch API credentials - VOD discovery is not available via streamlink fallback."
+        },
+        {
+          "id": "vod_limit",
+          "label": "VOD Limit per Channel",
+          "type": "number",
+          "default": 5,
+          "helper_text": "Maximum number of recent VODs to import per monitored Twitch channel."
+        },
+        {
+          "id": "auto_cleanup",
+          "label": "Auto-cleanup Ended Streams",
+          "type": "boolean",
+          "default": true,
+          "helper_text": "Automatically delete live-stream channels when the stream ends. Runs during each monitoring cycle. VOD channels are never auto-cleaned."
+        }
+      ]
     },
     {
-      "id": "target_custom_playlist_id",
-      "label": "Target Playlist (Custom)",
-      "type": "model_select",
-      "model": "App\\Models\\CustomPlaylist",
-      "label_attribute": "name",
-      "scope": "owned",
-      "required": false,
-      "helper_text": "Custom playlist to add created channels to. Leave empty to skip."
+      "id": "numbering_xtream",
+      "type": "section",
+      "label": "Numbering & Xtream",
+      "description": "Channel numbering strategy and Xtream client compatibility options.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "starting_channel_number",
+          "label": "Starting Channel Number",
+          "type": "number",
+          "default": 900,
+          "helper_text": "First channel number to assign. Each new stream increments from here. For best Xtream client compatibility, keep this in a low range (for example 900-999)."
+        },
+        {
+          "id": "channel_number_increment",
+          "label": "Channel Number Increment",
+          "type": "number",
+          "default": 1,
+          "helper_text": "How much to increment the channel number for each new stream."
+        },
+        {
+          "id": "channel_numbering_mode",
+          "label": "Channel Numbering Mode",
+          "type": "select",
+          "default": "sequential",
+          "options": {
+            "sequential": "Sequential (900, 901, 902)",
+            "decimal": "Decimal (50.1, 50.2, 50.3)"
+          },
+          "helper_text": "Decimal mode groups streams from the same Twitch channel using the channel's BaseNumber. Sequential mode uses a global counter."
+        },
+        {
+          "id": "xtream_compat_mode",
+          "label": "Xtream Compatibility Mode",
+          "type": "boolean",
+          "default": true,
+          "helper_text": "When enabled, Streamarr keeps channel numbers in a bounded range to avoid clients that hide high channel numbers."
+        },
+        {
+          "id": "xtream_min_channel_number",
+          "label": "Xtream Min Channel Number",
+          "type": "number",
+          "default": 900,
+          "helper_text": "Lower bound for Xtream compatibility numbering."
+        },
+        {
+          "id": "xtream_max_channel_number",
+          "label": "Xtream Max Channel Number",
+          "type": "number",
+          "default": 999,
+          "helper_text": "Upper bound for Xtream compatibility numbering. Existing plugin channels outside this range are auto-renumbered on Check Now."
+        },
+        {
+          "id": "xtream_ascii_text_mode",
+          "label": "Xtream ASCII Text Compatibility",
+          "type": "boolean",
+          "default": true,
+          "helper_text": "Removes emoji and problematic special characters from Streamarr channel names/titles to improve compatibility with strict Xtream clients."
+        }
+      ]
     },
     {
-      "id": "group_mode",
-      "label": "Group Mode",
-      "type": "select",
-      "default": "static",
-      "options": {
-        "static": "Static (fixed group name)",
-        "game": "By Game / Category (requires Twitch API)"
-      },
-      "helper_text": "Static uses the fixed group name below. Game mode groups live channels by their current Twitch game/category (e.g. 'Just Chatting', 'Fortnite'). Game mode requires Twitch API credentials and falls back to static without them. VOD channels always use the VOD Group name."
+      "id": "twitch_api",
+      "type": "section",
+      "label": "Twitch API",
+      "description": "Optional Twitch Helix API credentials for faster detection and VOD imports.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "twitch_client_id",
+          "label": "Twitch Client ID",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Twitch API Client ID for fast batch detection. Get one at https://dev.twitch.tv/console/apps - create an application and copy the Client ID. Leave empty to use streamlink fallback."
+        },
+        {
+          "id": "twitch_client_secret",
+          "label": "Twitch Client Secret",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Twitch API Client Secret. Required together with Client ID for API-based detection."
+        }
+      ]
     },
     {
-      "id": "channel_group",
-      "label": "Live Channel Group",
-      "type": "text",
-      "default": "Twitch Live",
-      "helper_text": "Group name for live-stream channels. Used in static mode, and as fallback in game mode when the game is unknown."
-    },
-    {
-      "id": "epg_mode",
-      "label": "EPG Mode",
-      "type": "select",
-      "default": "game",
-      "options": {
-        "game": "Game / Category (shows game changes as programme entries)",
-        "title": "Stream Title (single programme with the stream title)"
-      },
-      "helper_text": "Game mode creates a new programme entry each time the streamer switches games. Title mode shows a single continuous programme using the stream title — useful if you prefer all channels under one group with simpler EPG."
-    },
-    {
-      "id": "vod_group",
-      "label": "VOD Group",
-      "type": "text",
-      "default": "Twitch VODs",
-      "helper_text": "Group name for VOD channels."
-    },
-    {
-      "id": "stream_quality",
-      "label": "Stream Quality",
-      "type": "select",
-      "default": "best",
-      "options": {
-        "best": "Best Available",
-        "1080p60": "1080p 60fps",
-        "720p60": "720p 60fps",
-        "720p": "720p",
-        "480p": "480p",
-        "360p": "360p",
-        "160p": "160p",
-        "audio_only": "Audio Only"
-      },
-      "helper_text": "Preferred stream quality. Streamlink will select the closest available quality."
-    },
-    {
-      "id": "include_vods",
-      "label": "Include VODs",
-      "type": "boolean",
-      "default": false,
-      "helper_text": "Also create channels for recent VODs of monitored channels. Requires Twitch API credentials - VOD discovery is not available via streamlink fallback."
-    },
-    {
-      "id": "vod_limit",
-      "label": "VOD Limit per Channel",
-      "type": "number",
-      "default": 5,
-      "helper_text": "Maximum number of recent VODs to import per monitored Twitch channel."
-    },
-    {
-      "id": "auto_cleanup",
-      "label": "Auto-cleanup Ended Streams",
-      "type": "boolean",
-      "default": true,
-      "helper_text": "Automatically delete live-stream channels when the stream ends. Runs during each monitoring cycle. VOD channels are never auto-cleaned."
-    },
-    {
-      "id": "starting_channel_number",
-      "label": "Starting Channel Number",
-      "type": "number",
-      "default": 900,
-      "helper_text": "First channel number to assign. Each new stream increments from here. For best Xtream client compatibility, keep this in a low range (for example 900-999)."
-    },
-    {
-      "id": "channel_number_increment",
-      "label": "Channel Number Increment",
-      "type": "number",
-      "default": 1,
-      "helper_text": "How much to increment the channel number for each new stream."
-    },
-    {
-      "id": "channel_numbering_mode",
-      "label": "Channel Numbering Mode",
-      "type": "select",
-      "default": "sequential",
-      "options": {
-        "sequential": "Sequential (900, 901, 902)",
-        "decimal": "Decimal (50.1, 50.2, 50.3)"
-      },
-      "helper_text": "Decimal mode groups streams from the same Twitch channel using the channel's BaseNumber. Sequential mode uses a global counter."
-    },
-    {
-      "id": "xtream_compat_mode",
-      "label": "Xtream Compatibility Mode",
-      "type": "boolean",
-      "default": true,
-      "helper_text": "When enabled, Streamarr keeps channel numbers in a bounded range to avoid clients that hide high channel numbers."
-    },
-    {
-      "id": "xtream_min_channel_number",
-      "label": "Xtream Min Channel Number",
-      "type": "number",
-      "default": 900,
-      "helper_text": "Lower bound for Xtream compatibility numbering."
-    },
-    {
-      "id": "xtream_max_channel_number",
-      "label": "Xtream Max Channel Number",
-      "type": "number",
-      "default": 999,
-      "helper_text": "Upper bound for Xtream compatibility numbering. Existing plugin channels outside this range are auto-renumbered on Check Now."
-    },
-    {
-      "id": "xtream_ascii_text_mode",
-      "label": "Xtream ASCII Text Compatibility",
-      "type": "boolean",
-      "default": true,
-      "helper_text": "Removes emoji and problematic special characters from Streamarr channel names/titles to improve compatibility with strict Xtream clients."
-    },
-    {
-      "id": "twitch_client_id",
-      "label": "Twitch Client ID",
-      "type": "text",
-      "default": "",
-      "required": false,
-      "helper_text": "Twitch API Client ID for fast batch detection. Get one at https://dev.twitch.tv/console/apps - create an application and copy the Client ID. Leave empty to use streamlink fallback."
-    },
-    {
-      "id": "twitch_client_secret",
-      "label": "Twitch Client Secret",
-      "type": "text",
-      "default": "",
-      "required": false,
-      "helper_text": "Twitch API Client Secret. Required together with Client ID for API-based detection."
-    },
-    {
-      "id": "schedule_enabled",
-      "label": "Enable Automatic Monitoring",
-      "type": "boolean",
-      "default": false,
-      "helper_text": "Run monitoring automatically on the schedule below. Requires the scheduler to be running (php artisan schedule:run)."
-    },
-    {
-      "id": "schedule_cron",
-      "label": "Monitor Schedule (cron)",
-      "type": "text",
-      "default": "*/10 * * * *",
-      "helper_text": "Cron expression for automatic monitoring. Default: every 10 minutes. Examples: */5 * * * * (every 5 min), 0 * * * * (hourly)."
+      "id": "automation",
+      "type": "section",
+      "label": "Automation",
+      "description": "Scheduled monitoring behavior.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "schedule_enabled",
+          "label": "Enable Automatic Monitoring",
+          "type": "boolean",
+          "default": false,
+          "helper_text": "Run monitoring automatically on the schedule below. Requires the scheduler to be running (php artisan schedule:run)."
+        },
+        {
+          "id": "schedule_cron",
+          "label": "Monitor Schedule (cron)",
+          "type": "text",
+          "default": "*/10 * * * *",
+          "helper_text": "Cron expression for automatic monitoring. Default: every 10 minutes. Examples: */5 * * * * (every 5 min), 0 * * * * (hourly)."
+        }
+      ]
     }
   ],
   "actions": [
@@ -265,6 +354,20 @@
       "label": "Reset All Channels",
       "dry_run": false,
       "fields": []
+    },
+    {
+      "id": "test_url",
+      "label": "Test URL (Debug)",
+      "dry_run": false,
+      "fields": [
+        {
+          "id": "url",
+          "label": "Stream URL",
+          "type": "text",
+          "required": true,
+          "helper_text": "Any URL supported by streamlink (e.g. https://twitch.tv/pokimane or https://www.youtube.com/@ChannelHandle). Returns live status, metadata, and available stream qualities. Cookies from the configured Stream Profile are automatically used."
+        }
+      ]
     }
   ]
 }

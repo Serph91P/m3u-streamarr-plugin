@@ -79,6 +79,11 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'Providers/DTO/VodInfo.php',
             'Providers/PlatformProvider.php',
             'Providers/ProviderRegistry.php',
+            'Providers/BaseProvider.php',
+            'Providers/TwitchProvider.php',
+            'Providers/YouTubeProvider.php',
+            'Providers/KickProvider.php',
+            'Providers/GenericProvider.php',
         ];
         foreach ($files as $relative) {
             $path = $base.str_replace('/', DIRECTORY_SEPARATOR, $relative);
@@ -410,107 +415,57 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $context->warning('VOD discovery requires Twitch API credentials - skipping VODs.');
         }
 
-        // --- YouTube Live Streams ---
-        if (! empty($youTubeUrls)) {
-            $streamlink = $streamlink ?? $this->findStreamlink();
-
-            if (! $streamlink) {
-                $context->warning('streamlink not found. YouTube live streams cannot be checked. Install streamlink to enable YouTube monitoring.');
-            } else {
-                $context->heartbeat('Checking YouTube live streams…', progress: 83);
-
-                foreach ($youTubeUrls as $ytUrl) {
-                    $context->heartbeat("Checking YouTube: {$ytUrl}…");
-                    $ytInfo = $this->checkYouTubeLiveViaStreamlink($streamlink, $ytUrl, $cookiesFile);
-
-                    if ($ytInfo) {
-                        try {
-                            $wasNew = $this->createOrUpdateYouTubeChannel($ytInfo, $settings, $userId, $context);
-                            if ($wasNew) {
-                                $added++;
-                            } else {
-                                $updated++;
-                            }
-                        } catch (\Throwable $e) {
-                            $context->error("YouTube {$ytUrl}: failed - {$e->getMessage()}");
-                            $errors[] = "YouTube {$ytUrl}: {$e->getMessage()}";
-                        }
-                    } else {
-                        $context->info("YouTube not live: {$ytUrl}");
-                    }
-                }
+        // --- Detect non-Twitch live streams via streamlink (provider-driven loop) ---
+        // YouTube, Kick and the generic catch-all share an identical detection
+        // mechanism (`streamlink --json <url>`); the only differences are the
+        // group label and, for YouTube, the dedicated channel-creator that
+        // wires up an EPG entry. Iterating over the registry keeps the loop
+        // body tiny and lets later phases swap in per-provider detection.
+        $registry = $this->buildRegistry($settings);
+        $progressBase = 83;
+        foreach ($registry->all() as $provider) {
+            if ($provider->id() === 'twitch') {
+                continue;
             }
-        }
 
-        // --- Kick Live Streams ---
-        // Kick has its own loop so the kick_group setting can be honoured for
-        // grouping. The detection mechanism is identical to the generic path
-        // (streamlink --json), but the platform hint forces the right group.
-        if (! empty($kickUrls)) {
-            $streamlink = $streamlink ?? $this->findStreamlink();
-
-            if (! $streamlink) {
-                $context->warning('streamlink not found. Kick live streams cannot be checked. Install streamlink to enable Kick monitoring.');
-            } else {
-                $context->heartbeat('Checking Kick live streams…', progress: 85);
-
-                foreach ($kickUrls as $kickUrl) {
-                    $context->heartbeat("Checking Kick: {$kickUrl}…");
-                    $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $kickUrl, $cookiesFile);
-
-                    if ($info) {
-                        try {
-                            $wasNew = $this->createOrUpdateGenericChannel($info, $settings, $userId, $context, 'kick');
-                            if ($wasNew) {
-                                $added++;
-                            } else {
-                                $updated++;
-                            }
-                        } catch (\Throwable $e) {
-                            $context->error("Kick {$kickUrl}: failed - {$e->getMessage()}");
-                            $errors[] = "Kick {$kickUrl}: {$e->getMessage()}";
-                        }
-                    } else {
-                        $context->info("Kick not live: {$kickUrl}");
-                    }
-                }
+            $urls = $this->getChannelsForPlatform($provider->id(), $settings, $context);
+            if (empty($urls)) {
+                continue;
             }
-        }
 
-        // --- Detect generic streamlink-supported live streams ---
-        // Catch-all for every platform streamlink can resolve that isn't Twitch
-        // or YouTube: Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
-        // AfreecaTV, Mildom, etc. We don't pre-validate the host. streamlink
-        // either returns a stream JSON or it doesn't.
-        if (! empty($genericUrls)) {
             $streamlink = $streamlink ?? $this->findStreamlink();
-
             if (! $streamlink) {
-                $context->warning('streamlink not found. generic stream URLs cannot be checked. Install streamlink to enable Kick / Vimeo / BiliBili / Rumble / etc. monitoring.');
-            } else {
-                $context->heartbeat('Checking generic live streams…', progress: 86);
+                $context->warning("streamlink not found. {$provider->displayName()} streams cannot be checked. Install streamlink to enable monitoring for the remaining platforms.");
+                break;
+            }
 
-                foreach ($genericUrls as $genericUrl) {
-                    $context->heartbeat("Checking: {$genericUrl}…");
-                    // checkYouTubeLiveViaStreamlink is platform-agnostic. it
-                    // just runs `streamlink --json <url>` and parses metadata.
-                    $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $genericUrl, $cookiesFile);
+            $context->heartbeat("Checking {$provider->displayName()} live streams…", progress: $progressBase);
+            $progressBase = min(89, $progressBase + 1);
 
-                    if ($info) {
-                        try {
-                            $wasNew = $this->createOrUpdateGenericChannel($info, $settings, $userId, $context);
-                            if ($wasNew) {
-                                $added++;
-                            } else {
-                                $updated++;
-                            }
-                        } catch (\Throwable $e) {
-                            $context->error("Stream {$genericUrl}: failed - {$e->getMessage()}");
-                            $errors[] = "Stream {$genericUrl}: {$e->getMessage()}";
+            foreach ($urls as $url) {
+                $context->heartbeat("Checking {$provider->displayName()}: {$url}…");
+                $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $url, $cookiesFile);
+
+                if ($info) {
+                    try {
+                        if ($provider->id() === 'youtube') {
+                            $wasNew = $this->createOrUpdateYouTubeChannel($info, $settings, $userId, $context);
+                        } else {
+                            $platformHint = $provider->id() === 'generic' ? null : $provider->id();
+                            $wasNew = $this->createOrUpdateGenericChannel($info, $settings, $userId, $context, $platformHint);
                         }
-                    } else {
-                        $context->info("Not live: {$genericUrl}");
+
+                        if ($wasNew) {
+                            $added++;
+                        } else {
+                            $updated++;
+                        }
+                    } catch (\Throwable $e) {
+                        $context->error("{$provider->displayName()} {$url}: failed - {$e->getMessage()}");
+                        $errors[] = "{$provider->displayName()} {$url}: {$e->getMessage()}";
                     }
+                } else {
+                    $context->info("{$provider->displayName()} not live: {$url}");
                 }
             }
         }
@@ -2685,6 +2640,26 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         return $out;
+    }
+
+    /**
+     * Build a ProviderRegistry seeded with all currently supported platform
+     * stubs. Specific providers come first; the catch-all GenericProvider
+     * MUST be registered last so more specific matchers win.
+     *
+     * Phase 1 only uses the registry for the non-Twitch streamlink loop in
+     * handleCheckNow. Detection bodies on the stubs are intentionally empty;
+     * the orchestrator still drives streamlink directly.
+     */
+    private function buildRegistry(array $settings): Providers\ProviderRegistry
+    {
+        $registry = new Providers\ProviderRegistry();
+        $registry->register(new Providers\TwitchProvider());
+        $registry->register(new Providers\YouTubeProvider());
+        $registry->register(new Providers\KickProvider());
+        $registry->register(new Providers\GenericProvider());
+
+        return $registry;
     }
 
     /**

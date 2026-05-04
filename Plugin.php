@@ -149,12 +149,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         $this->epgMode = $this->resolveEpgMode($settings);
-        $channelEntries = $this->parseMonitoredChannels($settings['monitored_channels'] ?? '');
-        $youTubeUrls = $this->parseMonitoredYouTubeUrls($settings['monitored_channels'] ?? '');
-        $genericUrls = $this->parseMonitoredGenericUrls($settings['monitored_channels'] ?? '');
+        $combinedSource = $this->buildCombinedChannelSource($settings);
+        $channelEntries = $this->parseMonitoredChannels($combinedSource);
+        $youTubeUrls = $this->parseMonitoredYouTubeUrls($combinedSource);
+        $genericUrls = $this->parseMonitoredGenericUrls($combinedSource);
 
         if (empty($channelEntries) && empty($youTubeUrls) && empty($genericUrls)) {
-            return PluginActionResult::failure('No channels configured. Add Twitch usernames or stream URLs (YouTube, Kick, Vimeo, BiliBili, Rumble, …) to Monitored Channels.');
+            return PluginActionResult::failure('No channels configured. Add at least one entry to a platform section (Twitch, YouTube, Kick or Generic).');
         }
 
         $useApi = $this->hasTwitchApiCredentials($settings);
@@ -2505,6 +2506,28 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $this->groupsSortOrderColumnExists = Schema::hasColumn('groups', 'sort_order');
 
         return $this->groupsSortOrderColumnExists;
+    }
+
+    /**
+     * Merge the new per-platform channel fields and the legacy
+     * monitored_channels textarea into one newline-separated string so the
+     * existing Twitch / YouTube / Generic parsers can keep working unchanged.
+     *
+     * Order: Twitch first (the parser only matches bare logins on lines that
+     * are not URLs, so platform separation is detected by the parsers themselves
+     * via URL host matching).
+     */
+    private function buildCombinedChannelSource(array $settings): string
+    {
+        $parts = [];
+        foreach (['twitch_channels', 'youtube_channels', 'kick_channels', 'generic_channels', 'monitored_channels'] as $key) {
+            $value = trim((string) ($settings[$key] ?? ''));
+            if ($value !== '') {
+                $parts[] = $value;
+            }
+        }
+
+        return implode("\n", $parts);
     }
 
     /**

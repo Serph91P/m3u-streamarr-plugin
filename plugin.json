@@ -382,24 +382,6 @@
           "helper_text": "Cron expression for automatic monitoring. Default: every 10 minutes. Examples: */5 * * * * (every 5 min), 0 * * * * (hourly)."
         }
       ]
-    },
-    {
-      "id": "legacy_migration",
-      "type": "section",
-      "label": "Legacy (deprecated)",
-      "description": "Pre-1.8 settings kept for compatibility. Will be auto-migrated and removed in a future release.",
-      "collapsible": true,
-      "collapsed": true,
-      "fields": [
-        {
-          "id": "monitored_channels",
-          "label": "Legacy: Monitored Channels (deprecated)",
-          "type": "textarea",
-          "default": "",
-          "required": false,
-          "helper_text": "Deprecated. Existing data from v1.7.x is read from this field as a fallback until Task 5b ships the automatic split into the per-platform fields above. Do not add new entries here. Once your data has been migrated this field will be removed."
-        }
-      ]
     }
   ],
   "actions": [

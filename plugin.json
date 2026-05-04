@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create and remove channels. Per-platform settings groups, with auto-migration of legacy monitored_channels.",
@@ -258,7 +258,7 @@
           "type": "textarea",
           "default": "",
           "required": false,
-          "helper_text": "One Kick URL per line:\n  https://kick.com/trainwreckstv\n  https://kick.com/adinross\nLines starting with # are ignored.\n\nDetection uses streamlink, no API key needed. VOD discovery is not supported because Kick has no public listing API. Find live channels at https://kick.com/browse/categories"
+          "helper_text": "One Kick URL per line:\n  https://kick.com/trainwreckstv\n  https://kick.com/adinross\nLines starting with # are ignored.\n\nLive detection uses the public Kick API (no key required); streamlink is used as a fallback when the API is unreachable. Find live channels at https://kick.com/browse/categories"
         },
         {
           "id": "kick_group",
@@ -267,6 +267,37 @@
           "default": "",
           "required": false,
           "helper_text": "Optional. M3U group-title for Kick live channels. Leave empty to use the global Channel Group from Stream Defaults."
+        },
+        {
+          "id": "include_kick_vods",
+          "label": "Include Kick VODs",
+          "type": "toggle",
+          "default": false,
+          "helper_text": "When on, recent past broadcasts (VODs) for the Kick channels above are added as separate entries."
+        },
+        {
+          "id": "max_kick_vods_per_channel",
+          "label": "Max Kick VODs per Channel",
+          "type": "number",
+          "default": 5,
+          "min": 1,
+          "max": 50,
+          "helper_text": "Upper bound on how many recent VODs to import per Kick channel (1-50)."
+        },
+        {
+          "id": "kick_vod_group",
+          "label": "Kick VOD Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. M3U group-title for Kick VOD entries. Leave empty to derive from the Kick live group with a 'VODs' suffix."
+        },
+        {
+          "id": "kick_use_streamlink_fallback",
+          "label": "Force Streamlink for Kick",
+          "type": "toggle",
+          "default": false,
+          "helper_text": "When on, the Kick API is bypassed and streamlink is used directly. Useful if the Kick API is consistently blocked by Cloudflare in your environment."
         }
       ]
     },

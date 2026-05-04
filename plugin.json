@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create and remove channels. Per-platform settings groups, with auto-migration of legacy monitored_channels.",
@@ -233,7 +233,7 @@
           "type": "textarea",
           "default": "",
           "required": false,
-          "helper_text": "One YouTube URL per line:\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\nLines starting with # are ignored.\n\nDetection uses streamlink and currently supports live streams only. Cookies from the linked Stream Profile are passed automatically."
+          "helper_text": "One YouTube channel per line. Accepted formats:\n  @ChannelHandle\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\nLines starting with # are ignored.\n\nDetection uses streamlink and currently supports live streams only. Cookies from the linked Stream Profile are passed automatically."
         },
         {
           "id": "youtube_group",
@@ -266,7 +266,7 @@
           "type": "textarea",
           "default": "",
           "required": false,
-          "helper_text": "One Kick URL per line:\n  https://kick.com/trainwreckstv\n  https://kick.com/adinross\nLines starting with # are ignored.\n\nLive detection uses the public Kick API (no key required); streamlink is used as a fallback when the API is unreachable. Find live channels at https://kick.com/browse/categories"
+          "helper_text": "One Kick channel per line. Accepted formats:\n  https://kick.com/trainwreckstv\n  kick:trainwreckstv\nLines starting with # are ignored.\n\nNote: a bare slug without the 'kick:' prefix would conflict with Twitch bare logins, so it is not accepted as a Kick channel.\n\nLive detection uses the public Kick API (no key required); streamlink is used as a fallback when the API is unreachable. Find live channels at https://kick.com/browse/categories"
         },
         {
           "id": "kick_group",

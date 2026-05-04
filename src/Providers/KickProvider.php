@@ -41,12 +41,31 @@ class KickProvider extends BaseProvider
 
     public function matches(string $rawLine): bool
     {
-        return self::isKickUrl(trim($rawLine));
+        $line = trim($rawLine);
+
+        return self::isKickUrl($line) || self::isKickShortcut($line);
     }
 
     public function parseEntry(string $rawLine): ?MonitoredEntry
     {
         $line = trim($rawLine);
+
+        // "kick:slug" shortcut: expand to a canonical channel URL. A bare slug
+        // without the "kick:" prefix is intentionally NOT supported because it
+        // would collide with Twitch bare logins (backwards compatibility).
+        if (self::isKickShortcut($line)) {
+            $slug = strtolower(substr($line, 5));
+            $url = 'https://kick.com/'.$slug;
+
+            return new MonitoredEntry(
+                provider: $this->id(),
+                providerId: $url,
+                label: $slug,
+                rawLine: $line,
+                extras: ['slug' => $slug],
+            );
+        }
+
         if (! self::isKickUrl($line)) {
             return null;
         }
@@ -63,6 +82,18 @@ class KickProvider extends BaseProvider
             rawLine: $line,
             extras: ['slug' => $slug],
         );
+    }
+
+    /**
+     * True for the "kick:slug" prefix shortcut.
+     */
+    private static function isKickShortcut(string $line): bool
+    {
+        if (! preg_match('/^kick:([A-Za-z0-9_]{1,50})$/', $line, $m)) {
+            return false;
+        }
+
+        return true;
     }
 
     public function supportsVods(): bool

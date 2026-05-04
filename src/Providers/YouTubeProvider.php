@@ -54,12 +54,30 @@ class YouTubeProvider extends BaseProvider
 
     public function matches(string $rawLine): bool
     {
-        return self::isYouTubeUrl(trim($rawLine));
+        $line = trim($rawLine);
+
+        return self::isYouTubeUrl($line) || self::isBareHandle($line);
     }
 
     public function parseEntry(string $rawLine): ?MonitoredEntry
     {
         $line = trim($rawLine);
+
+        // Bare "@Handle" shortcut: expand to a canonical channel URL so the
+        // rest of the pipeline (extractHandle, streamlink fallback, etc.)
+        // keeps working unchanged.
+        if (self::isBareHandle($line)) {
+            $handle = ltrim($line, '@');
+            $url = 'https://www.youtube.com/@'.$handle;
+
+            return new MonitoredEntry(
+                provider: $this->id(),
+                providerId: $url,
+                label: '@'.$handle,
+                rawLine: $line,
+            );
+        }
+
         if (! self::isYouTubeUrl($line)) {
             return null;
         }
@@ -70,6 +88,16 @@ class YouTubeProvider extends BaseProvider
             label: $line,
             rawLine: $line,
         );
+    }
+
+    /**
+     * True when the input is a bare "@Handle" shortcut (no whitespace, no
+     * slashes). Bare logins without a leading "@" are deliberately NOT
+     * treated as YouTube to avoid colliding with Twitch bare logins.
+     */
+    private static function isBareHandle(string $line): bool
+    {
+        return (bool) preg_match('/^@[A-Za-z0-9._-]{1,}$/', $line);
     }
 
     /**

@@ -72,11 +72,16 @@ Lines starting with `#` are ignored.
 - **Twitch**: bare logins are accepted as a shortcut (e.g. `pokimane`).
   Decimal numbering supported via `username=BaseNumber`. VOD URLs
   (`https://twitch.tv/videos/<id>`) are also accepted via the manual action.
-- **YouTube**: full URL only. Channel handles
-  (`https://www.youtube.com/@Handle`), channel IDs
+- **YouTube**: bare `@Handle` shortcut (e.g. `@LinusTechTips`) or a full URL.
+  Channel handles (`https://www.youtube.com/@Handle`), channel IDs
   (`https://www.youtube.com/channel/UCxxxx`) and watch URLs
-  (`https://www.youtube.com/watch?v=xxxx`) are supported.
-- **Kick**: full URL only (`https://kick.com/<slug>`).
+  (`https://www.youtube.com/watch?v=xxxx`) are supported. A bare handle
+  without the leading `@` is intentionally not accepted because it would
+  collide with Twitch bare logins.
+- **Kick**: `kick:<slug>` shortcut (e.g. `kick:trainwreckstv`) or a full URL
+  (`https://kick.com/<slug>`). A bare slug without the `kick:` prefix is
+  intentionally not accepted because it would collide with Twitch bare
+  logins.
 - **Generic / Other Platforms**: full URL only. Anything streamlink recognises
   is accepted; Streamarr derives a host-based label from the URL for logging.
 

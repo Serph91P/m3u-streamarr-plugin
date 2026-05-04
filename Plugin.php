@@ -151,9 +151,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $this->epgMode = $this->resolveEpgMode($settings);
         $channelEntries = $this->parseMonitoredChannels($settings['monitored_channels'] ?? '');
         $youTubeUrls = $this->parseMonitoredYouTubeUrls($settings['monitored_channels'] ?? '');
+        $genericUrls = $this->parseMonitoredGenericUrls($settings['monitored_channels'] ?? '');
 
-        if (empty($channelEntries) && empty($youTubeUrls)) {
-            return PluginActionResult::failure('No channels configured. Add Twitch usernames or YouTube URLs to Monitored Channels.');
+        if (empty($channelEntries) && empty($youTubeUrls) && empty($genericUrls)) {
+            return PluginActionResult::failure('No channels configured. Add Twitch usernames or stream URLs (YouTube, Kick, Vimeo, BiliBili, Rumble, …) to Monitored Channels.');
         }
 
         $useApi = $this->hasTwitchApiCredentials($settings);
@@ -430,6 +431,44 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                         }
                     } else {
                         $context->info("YouTube not live: {$ytUrl}");
+                    }
+                }
+            }
+        }
+
+        // --- Detect generic streamlink-supported live streams ---
+        // Catch-all for every platform streamlink can resolve that isn't Twitch
+        // or YouTube: Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
+        // AfreecaTV, Mildom, etc. We don't pre-validate the host — streamlink
+        // either returns a stream JSON or it doesn't.
+        if (! empty($genericUrls)) {
+            $streamlink = $streamlink ?? $this->findStreamlink();
+
+            if (! $streamlink) {
+                $context->warning('streamlink not found — generic stream URLs cannot be checked. Install streamlink to enable Kick / Vimeo / BiliBili / Rumble / etc. monitoring.');
+            } else {
+                $context->heartbeat('Checking generic live streams…', progress: 86);
+
+                foreach ($genericUrls as $genericUrl) {
+                    $context->heartbeat("Checking: {$genericUrl}…");
+                    // checkYouTubeLiveViaStreamlink is platform-agnostic — it
+                    // just runs `streamlink --json <url>` and parses metadata.
+                    $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $genericUrl, $cookiesFile);
+
+                    if ($info) {
+                        try {
+                            $wasNew = $this->createOrUpdateGenericChannel($info, $settings, $userId, $context);
+                            if ($wasNew) {
+                                $added++;
+                            } else {
+                                $updated++;
+                            }
+                        } catch (\Throwable $e) {
+                            $context->error("Stream {$genericUrl}: failed - {$e->getMessage()}");
+                            $errors[] = "Stream {$genericUrl}: {$e->getMessage()}";
+                        }
+                    } else {
+                        $context->info("Not live: {$genericUrl}");
                     }
                 }
             }
@@ -1422,6 +1461,36 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             }
         }
 
+        // --- Cleanup ended generic streamlink streams (Kick, Vimeo, …) ---
+        /** @var Collection<int, Channel> $genericChannels */
+        $genericChannels = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->whereJsonContains('info->streamlink_stream_type', self::STREAM_TYPE_LIVE)
+            ->get();
+
+        if ($genericChannels->isNotEmpty()) {
+            $streamlink = $streamlink ?? $this->findStreamlink();
+
+            if (! $streamlink) {
+                $context->warning('Cannot check generic stream status - streamlink not found.');
+            } else {
+                foreach ($genericChannels as $channel) {
+                    $url = data_get($channel->info, 'streamlink_monitored_url', '');
+                    if (! $url) {
+                        continue;
+                    }
+
+                    $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $url, $cookiesFile);
+
+                    if (! $info) {
+                        $context->info("Stream ended: {$url} (channel #{$channel->channel} '{$channel->title}') - removing.");
+                        $channel->delete();
+                        $cleaned++;
+                    }
+                }
+            }
+        }
+
         return $cleaned;
     }
 
@@ -1501,6 +1570,124 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $context->info("YouTube added: {$monitoredUrl} — '{$title}' (ch #{$channel->channel})");
 
         return true;
+    }
+
+    /**
+     * Create or update a channel for any non-Twitch / non-YouTube platform that
+     * streamlink can resolve (Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP,
+     * DLive, AfreecaTV, Mildom, …). Mirrors createOrUpdateYouTubeChannel — the
+     * monitored URL is the stable identity, the resolved HLS stream is computed
+     * by m3u-proxy / streamlink at playback time.
+     *
+     * @param  array{url:string,title:string,author:string,category:string,id:string}  $info
+     */
+    private function createOrUpdateGenericChannel(
+        array $info,
+        array $settings,
+        int $userId,
+        PluginExecutionContext $context,
+    ): bool {
+        $monitoredUrl = $info['url'];
+        $platform = $this->detectPlatformLabel($monitoredUrl);
+        $group = $settings['streamlink_group'] ?? ($settings['youtube_group'] ?? 'Live Streams');
+
+        /** @var Channel|null $existing */
+        $existing = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->whereJsonContains('info->streamlink_monitored_url', $monitoredUrl)
+            ->whereJsonContains('info->streamlink_stream_type', self::STREAM_TYPE_LIVE)
+            ->first();
+
+        $title = $info['title'] ?: ($info['author'] ?: $platform.' Live');
+
+        if ($existing) {
+            $infoCol = $existing->info ?? [];
+            $infoCol['streamlink_title'] = $info['title'];
+            $infoCol['streamlink_author'] = $info['author'];
+            $infoCol['streamlink_category'] = $info['category'];
+
+            $existing->title = $title;
+            $existing->info = $infoCol;
+            $existing->save();
+
+            $context->info("{$platform} updated: {$monitoredUrl} — '{$title}'");
+
+            return false;
+        }
+
+        /** @var \App\Models\Group $groupModel */
+        $groupModel = \App\Models\Group::firstOrCreate(
+            ['user_id' => $userId, 'name' => $group],
+            ['user_id' => $userId, 'name' => $group],
+        );
+
+        $channelNumber = $this->nextChannelNumber($userId, $settings, strtolower($platform), null);
+
+        $infoCol = [
+            'plugin' => self::PLUGIN_MARKER,
+            'streamlink_stream_type' => self::STREAM_TYPE_LIVE,
+            'streamlink_monitored_url' => $monitoredUrl,
+            'streamlink_platform' => $platform,
+            'streamlink_title' => $info['title'],
+            'streamlink_author' => $info['author'],
+            'streamlink_category' => $info['category'],
+            'streamlink_id' => $info['id'],
+        ];
+
+        $channel = Channel::create([
+            'user_id' => $userId,
+            'title' => $title,
+            'name' => $title,
+            'url' => $monitoredUrl,
+            'group_id' => $groupModel->id,
+            'channel' => $channelNumber,
+            'is_active' => true,
+            'info' => $infoCol,
+        ]);
+
+        $context->info("{$platform} added: {$monitoredUrl} — '{$title}' (ch #{$channel->channel})");
+
+        return true;
+    }
+
+    /**
+     * Best-effort human-readable platform label from a stream URL.
+     */
+    private function detectPlatformLabel(string $url): string
+    {
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $host = preg_replace('/^www\./', '', $host) ?? $host;
+
+        $map = [
+            'kick.com' => 'Kick',
+            'vimeo.com' => 'Vimeo',
+            'live.bilibili.com' => 'BiliBili',
+            'bilibili.com' => 'BiliBili',
+            'rumble.com' => 'Rumble',
+            'nicovideo.jp' => 'NicoNico',
+            'live.nicovideo.jp' => 'NicoNico',
+            'sooplive.co.kr' => 'SOOP',
+            'dlive.tv' => 'DLive',
+            'afreecatv.com' => 'AfreecaTV',
+            'play.afreecatv.com' => 'AfreecaTV',
+            'mildom.com' => 'Mildom',
+            'trovo.live' => 'Trovo',
+            'huya.com' => 'Huya',
+            'douyu.com' => 'Douyu',
+            'ok.ru' => 'OK.ru',
+        ];
+
+        if (isset($map[$host])) {
+            return $map[$host];
+        }
+
+        // Fallback: derive label from the registrable domain.
+        $parts = explode('.', $host);
+        if (count($parts) >= 2) {
+            return ucfirst($parts[count($parts) - 2]);
+        }
+
+        return 'Live';
     }
 
     // -------------------------------------------------------------------------
@@ -2346,6 +2533,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 continue;
             }
 
+            // Skip any other http(s):// URL — handled by the generic streamlink path.
+            // Twitch website URLs (https://www.twitch.tv/xqc) currently fall through
+            // here too; users should use the bare login form instead.
+            if (preg_match('#^https?://#i', $line)) {
+                continue;
+            }
+
             $login = null;
             $baseNumber = null;
 
@@ -2353,7 +2547,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 $login = strtolower($m[1]);
                 $baseNumber = isset($m[2]) && $m[2] !== '' ? (int) $m[2] : null;
             } else {
-                $login = strtolower(trim($line));
+                // Last-resort: if the line still looks like a plain word, treat it as
+                // a Twitch login. Anything that clearly isn't (slashes, spaces, etc.)
+                // is silently dropped — better than sending garbage to Helix.
+                $clean = strtolower(trim($line));
+                if ($clean !== '' && preg_match('/^[\w.-]+$/', $clean)) {
+                    $login = $clean;
+                }
             }
 
             if ($login) {
@@ -2396,6 +2596,46 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     private function isYouTubeUrl(string $entry): bool
     {
         return (bool) preg_match('#^https?://(www\.)?(youtube\.com|youtu\.be)/#i', $entry);
+    }
+
+    /**
+     * Detect whether a URL is for Twitch (handled by the dedicated Twitch path).
+     */
+    private function isTwitchUrl(string $entry): bool
+    {
+        return (bool) preg_match('#^https?://(www\.)?twitch\.tv/#i', $entry);
+    }
+
+    /**
+     * Parse the monitored_channels textarea and return URLs that should be
+     * handled by the generic streamlink provider (anything that isn't Twitch
+     * or YouTube — Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
+     * AfreecaTV, Mildom, etc.).
+     *
+     * @return list<string>
+     */
+    private function parseMonitoredGenericUrls(string $raw): array
+    {
+        $urls = [];
+
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if (! preg_match('#^https?://#i', $line)) {
+                continue;
+            }
+
+            if ($this->isYouTubeUrl($line) || $this->isTwitchUrl($line)) {
+                continue;
+            }
+
+            $urls[] = $line;
+        }
+
+        return array_values(array_unique($urls));
     }
 
     /**

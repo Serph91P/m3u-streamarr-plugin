@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.3.1] - 2026-05-04
+
+### Fixed
+- YouTube multi live regression where only one of several concurrent
+  broadcasts ended up enabled. When a legacy row existed for the monitored
+  URL, the loop adopted that same row for every sibling in turn and kept
+  overwriting it, so the final state only retained one live (whichever was
+  processed last). The legacy URL fallback now only adopts a candidate row
+  when its stored `youtube_id` is empty (true legacy) or matches the
+  current videoId, so additional siblings always create their own row.
+
 ## [2.2.0] - 2026-05-04
 
 ### Added

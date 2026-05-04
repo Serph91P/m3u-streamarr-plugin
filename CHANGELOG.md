@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.15.0] - 2026-05-04
+
+### Added
+- Optional `YouTube Data API v3 Key` setting in the YouTube section. When provided, `YouTubeProvider::detectLive()` resolves channel handles, calls `search.list?eventType=live` for channelId entries and `videos.list?part=liveStreamingDetails` for `watch?v=` entries, returning the same info shape that the existing channel-creator consumes. Faster than spawning streamlink per URL and avoids HTTP 429 throttling when monitoring many channels.
+- Streamlink fallback per URL is preserved: legacy `/c/` paths, handle-resolution failures, single-call HTTP errors and network errors push the URL into the provider's `pendingFallback` bucket; the orchestrator drains it through `checkYouTubeLiveViaStreamlink()` exactly as today.
+- On `403 quotaExceeded` the provider logs one warning and drains all remaining URLs to streamlink for the rest of the run. On `400 keyInvalid` it logs one warning and drains the entire run to streamlink.
+
+### Notes
+- Quota cost: `search.list` is 100 units per call. The default 10000 daily quota covers roughly 100 channel checks per day. Heavier usage requires either fewer channels or a quota increase from Google.
+- API key never appears in logs.
+- Without a key, behaviour is byte-identical to v1.14.0 (every YouTube URL is probed via streamlink, just like before).
+- The YouTube cleanup loop (ended-stream detection on already-live channels) still uses streamlink. Marked with a TODO for a follow-up.
+
+### Unchanged
+- Twitch and Kick code paths are untouched.
+- No new permissions, no new database tables, no new migrations.
+
 ## [1.13.1] - 2026-05-04
 
 ### Fixed

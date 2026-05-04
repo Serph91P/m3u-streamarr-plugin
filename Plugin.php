@@ -520,6 +520,63 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 continue;
             }
 
+            // YouTube takes the provider-driven path when an API key is
+            // configured (real YouTube Data API v3 lookup); otherwise it
+            // falls through to the inline streamlink probe below, which
+            // is byte-identical to pre-v1.15 behaviour.
+            if ($provider->id() === 'youtube') {
+                $context->heartbeat("Checking {$provider->displayName()} live streams…", progress: $progressBase);
+                $progressBase = min(89, $progressBase + 1);
+
+                /** @var Providers\YouTubeProvider $ytProvider */
+                $ytProvider = $provider;
+                $ytEntries = [];
+                foreach ($urls as $url) {
+                    $entry = $ytProvider->parseEntry($url);
+                    if ($entry) {
+                        $ytEntries[] = $entry;
+                    }
+                }
+
+                $apiResults = [];
+                if (! empty($ytEntries)) {
+                    $apiResults = $ytProvider->detectLive($ytEntries, $settings, $cookiesFile);
+                }
+                $fallbackUrls = $ytProvider->getPendingFallback();
+
+                foreach ($urls as $url) {
+                    $info = $apiResults[$url] ?? null;
+
+                    if ($info === null && in_array($url, $fallbackUrls, true)) {
+                        $streamlink = $streamlink ?? $this->findStreamlink();
+                        if (! $streamlink) {
+                            $context->warning("streamlink not found. YouTube fallback for {$url} skipped.");
+                            continue;
+                        }
+                        $context->heartbeat("Checking YouTube fallback: {$url}…");
+                        $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $url, $cookiesFile);
+                    }
+
+                    if ($info) {
+                        try {
+                            $wasNew = $this->createOrUpdateYouTubeChannel($info, $settings, $userId, $context);
+                            if ($wasNew) {
+                                $added++;
+                            } else {
+                                $updated++;
+                            }
+                        } catch (\Throwable $e) {
+                            $context->error("YouTube {$url}: failed - {$e->getMessage()}");
+                            $errors[] = "YouTube {$url}: {$e->getMessage()}";
+                        }
+                    } else {
+                        $context->info("YouTube not live: {$url}");
+                    }
+                }
+
+                continue;
+            }
+
             $streamlink = $streamlink ?? $this->findStreamlink();
             if (! $streamlink) {
                 $context->warning("streamlink not found. {$provider->displayName()} streams cannot be checked. Install streamlink to enable monitoring for the remaining platforms.");
@@ -1515,6 +1572,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         // --- Cleanup ended YouTube live streams ---
+        // TODO(streamarr v1.16+): migrate this cleanup loop to YouTubeProvider::detectLive()
+        // so already-live channels are re-checked through the YouTube Data API
+        // when a key is configured. Cleanup is less frequent than discovery
+        // and lower-priority, so it stays on the streamlink probe for now.
         /** @var Collection<int, Channel> $ytChannels */
         $ytChannels = Channel::where('user_id', $userId)
             ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)

@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create and remove channels. Per-platform settings groups, with auto-migration of legacy monitored_channels.",
@@ -223,7 +223,7 @@
       "id": "platform_youtube",
       "type": "section",
       "label": "YouTube",
-      "description": "YouTube live streams. VOD support is planned for a later release.",
+      "description": "YouTube live streams. Detection uses streamlink by default; supplying an optional YouTube Data API v3 key switches to the official API for faster, rate-limit-free probing. VOD support is planned for a later release.",
       "collapsible": true,
       "collapsed": true,
       "fields": [
@@ -241,6 +241,14 @@
           "type": "text",
           "default": "YouTube Live",
           "helper_text": "Optional. M3U group-title for YouTube live channels. Leave empty to use the global Channel Group from Stream Defaults."
+        },
+        {
+          "id": "youtube_api_key",
+          "label": "YouTube Data API v3 Key (optional)",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. Provide a YouTube Data API v3 key to use the official API for live detection instead of streamlink. Faster and avoids HTTP 429 rate-limits when monitoring many channels. Cost: ~100 quota units per channel check; the default 10000 daily quota covers about 100 channel checks per day. Without a key, streamlink is used (unchanged behavior). Get a key at https://console.cloud.google.com/apis/library/youtube.googleapis.com"
         }
       ]
     },

@@ -1738,12 +1738,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return false;
         }
 
-        // Create the group if needed
-        /** @var \App\Models\Group $groupModel */
-        $groupModel = \App\Models\Group::firstOrCreate(
-            ['user_id' => $userId, 'name' => $group],
-            ['user_id' => $userId, 'name' => $group],
-        );
+        // Resolve playlist target so we satisfy the NOT NULL playlist_id FK on `groups`.
+        $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+        $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+        $groupModel = $this->resolveOrCreateGroup($group, $userId, $playlistId, $customPlaylistId);
+        if (! $groupModel) {
+            $context->error("YouTube cannot create channel for {$monitoredUrl}: no target playlist configured (target_playlist_id is required to create groups).");
+
+            return false;
+        }
 
         $channelNumber = $this->nextChannelNumber($userId, $settings, 'youtube', null);
 
@@ -1767,6 +1770,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'name' => $title,
             'url' => $streamUrl,
             'group_id' => $groupModel->id,
+            'playlist_id' => $playlistId,
+            'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
             'is_active' => true,
             'info' => $info,
@@ -1824,11 +1829,14 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return false;
         }
 
-        /** @var \App\Models\Group $groupModel */
-        $groupModel = \App\Models\Group::firstOrCreate(
-            ['user_id' => $userId, 'name' => $group],
-            ['user_id' => $userId, 'name' => $group],
-        );
+        $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+        $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+        $groupModel = $this->resolveOrCreateGroup($group, $userId, $playlistId, $customPlaylistId);
+        if (! $groupModel) {
+            $context->error("{$platform} cannot create channel for {$monitoredUrl}: no target playlist configured (target_playlist_id is required to create groups).");
+
+            return false;
+        }
 
         $channelNumber = $this->nextChannelNumber($userId, $settings, strtolower($platform), null);
 
@@ -1849,6 +1857,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'name' => $title,
             'url' => $monitoredUrl,
             'group_id' => $groupModel->id,
+            'playlist_id' => $playlistId,
+            'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
             'is_active' => true,
             'info' => $infoCol,
@@ -1889,11 +1899,14 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             ? $vodGroupOverride
             : ($this->resolveGroupForPlatform($platformId, $settings).' VODs');
 
-        /** @var \App\Models\Group $groupModel */
-        $groupModel = \App\Models\Group::firstOrCreate(
-            ['user_id' => $userId, 'name' => $groupName],
-            ['user_id' => $userId, 'name' => $groupName],
-        );
+        $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+        $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+        $groupModel = $this->resolveOrCreateGroup($groupName, $userId, $playlistId, $customPlaylistId);
+        if (! $groupModel) {
+            $context->error("{$platformLabel} VOD cannot create channel for {$entry->raw}: no target playlist configured (target_playlist_id is required to create groups).");
+
+            return false;
+        }
 
         $channelNumber = $this->nextChannelNumber($userId, $settings, $platformId.'-vod-'.$vod->vodId, null);
         $title = $vod->title !== '' ? $vod->title : ($entry->label.' - VOD');
@@ -1920,6 +1933,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'name' => $title,
             'url' => $vod->url,
             'group_id' => $groupModel->id,
+            'playlist_id' => $playlistId,
+            'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
             'is_active' => true,
             'is_vod' => true,

@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0] - 2026-05-04
+
+### Added
+- `@Handle` shortcut for YouTube channels in the YouTube Channels setting
+  (e.g. `@LinusTechTips`). Internally expanded to
+  `https://www.youtube.com/@Handle` so all existing detection paths keep
+  working unchanged.
+- `kick:<slug>` shortcut for Kick channels in the Kick Channels setting
+  (e.g. `kick:trainwreckstv`). Internally expanded to
+  `https://kick.com/<slug>`. A bare slug without the `kick:` prefix is
+  intentionally not accepted because it would conflict with Twitch bare
+  logins (backwards compatibility).
+
 ## [2.0.0] - 2026-05-04
 
 ### Added

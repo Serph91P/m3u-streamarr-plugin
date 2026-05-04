@@ -586,8 +586,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $context->heartbeat("Checking {$provider->displayName()} live streams…", progress: $progressBase);
             $progressBase = min(89, $progressBase + 1);
 
+            // Prefer host-based labels for the catch-all provider so logs say
+            // "Checking dlive.tv: ..." instead of "Checking Live Streams: ...".
+            // Specific providers keep their displayName().
             foreach ($urls as $url) {
-                $context->heartbeat("Checking {$provider->displayName()}: {$url}…");
+                $label = $provider->id() === 'generic'
+                    ? ($this->extractHostLabel($url) ?: $provider->displayName())
+                    : $provider->displayName();
+
+                $context->heartbeat("Checking {$label}: {$url}…");
                 $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $url, $cookiesFile);
 
                 if ($info) {
@@ -605,11 +612,11 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                             $updated++;
                         }
                     } catch (\Throwable $e) {
-                        $context->error("{$provider->displayName()} {$url}: failed - {$e->getMessage()}");
-                        $errors[] = "{$provider->displayName()} {$url}: {$e->getMessage()}";
+                        $context->error("{$label} {$url}: failed - {$e->getMessage()}");
+                        $errors[] = "{$label} {$url}: {$e->getMessage()}";
                     }
                 } else {
-                    $context->info("{$provider->displayName()} not live: {$url}");
+                    $context->info("{$label} not live: {$url}");
                 }
             }
         }
@@ -1572,10 +1579,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         // --- Cleanup ended YouTube live streams ---
-        // TODO(streamarr v1.16+): migrate this cleanup loop to YouTubeProvider::detectLive()
-        // so already-live channels are re-checked through the YouTube Data API
-        // when a key is configured. Cleanup is less frequent than discovery
-        // and lower-priority, so it stays on the streamlink probe for now.
+        // When a YouTube Data API key is configured, route the re-check through
+        // YouTubeProvider::detectLive() so already-live channels use the same
+        // batched API path as discovery (and consume the same quota budget).
+        // Otherwise fall back to the streamlink probe.
         /** @var Collection<int, Channel> $ytChannels */
         $ytChannels = Channel::where('user_id', $userId)
             ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
@@ -1583,24 +1590,78 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             ->get();
 
         if ($ytChannels->isNotEmpty()) {
-            $streamlink = $streamlink ?? $this->findStreamlink();
+            $apiKey = trim((string) ($settings['youtube_api_key'] ?? ''));
+            $apiResults = [];
+            $fallbackUrls = [];
 
-            if (! $streamlink) {
-                $context->warning('Cannot check YouTube stream status - streamlink not found.');
-            } else {
+            if ($apiKey !== '') {
+                $ytProvider = new Providers\YouTubeProvider();
+                $entries = [];
                 foreach ($ytChannels as $channel) {
-                    $ytUrl = data_get($channel->info, 'youtube_monitored_url', '');
-                    if (! $ytUrl) {
+                    $url = (string) data_get($channel->info, 'youtube_monitored_url', '');
+                    if ($url === '') {
                         continue;
                     }
-
-                    $ytInfo = $this->checkYouTubeLiveViaStreamlink($streamlink, $ytUrl, $cookiesFile);
-
-                    if (! $ytInfo) {
-                        $context->info("YouTube stream ended: {$ytUrl} (channel #{$channel->channel} '{$channel->title}') - removing.");
-                        $channel->delete();
-                        $cleaned++;
+                    $entry = $ytProvider->parseEntry($url);
+                    if ($entry) {
+                        $entries[] = $entry;
                     }
+                }
+                if (! empty($entries)) {
+                    try {
+                        $apiResults = $ytProvider->detectLive($entries, $settings, $cookiesFile);
+                        $fallbackUrls = $ytProvider->getPendingFallback();
+                    } catch (\Throwable $e) {
+                        $context->warning("YouTube cleanup API call failed, falling back to streamlink: {$e->getMessage()}");
+                        $apiResults = [];
+                        $fallbackUrls = [];
+                    }
+                }
+            }
+
+            // Resolve streamlink once. We almost always need it: even when an API
+            // key is set we still confirm "offline-per-API" results via streamlink
+            // before deleting (so a quota blip doesn't wipe live channels).
+            $streamlink = $streamlink ?? $this->findStreamlink();
+            if (! $streamlink) {
+                $context->warning('Cannot check YouTube stream status - streamlink not found.');
+            }
+
+            foreach ($ytChannels as $channel) {
+                $ytUrl = (string) data_get($channel->info, 'youtube_monitored_url', '');
+                if ($ytUrl === '') {
+                    continue;
+                }
+
+                // Decide whether this URL was answered by the API. A URL is
+                // "API-answered" when a key is configured AND it did not land in
+                // the fallback bucket. apiResults only contains live entries,
+                // so absence means offline-per-API.
+                $apiAnsweredOffline = $apiKey !== ''
+                    && ! in_array($ytUrl, $fallbackUrls, true)
+                    && ! array_key_exists($ytUrl, $apiResults);
+
+                $info = $apiResults[$ytUrl] ?? null;
+
+                // Streamlink probe runs when:
+                //   - no API key (or every URL fell back), or
+                //   - this URL fell back, or
+                //   - API said offline (be conservative: confirm before
+                //     deleting so a transient quota error / 5xx doesn't
+                //     wipe a still-live channel).
+                if ($info === null && isset($streamlink) && $streamlink) {
+                    $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $ytUrl, $cookiesFile);
+                }
+
+                if (! $info) {
+                    if ($apiAnsweredOffline && (! isset($streamlink) || ! $streamlink)) {
+                        // API said offline, no streamlink to confirm: keep the
+                        // channel rather than risk deleting a live one.
+                        continue;
+                    }
+                    $context->info("YouTube stream ended: {$ytUrl} (channel #{$channel->channel} '{$channel->title}') - removing.");
+                    $channel->delete();
+                    $cleaned++;
                 }
             }
         }
@@ -2729,6 +2790,25 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         $this->groupsSortOrderColumnExists = Schema::hasColumn('groups', 'sort_order');
 
         return $this->groupsSortOrderColumnExists;
+    }
+
+    /**
+     * Extract a short hostname label for log lines, e.g. "dlive.tv" from
+     * "https://dlive.tv/foo". Strips a leading "www." for readability.
+     * Returns null when the URL is unparseable.
+     */
+    private function extractHostLabel(string $url): ?string
+    {
+        $host = parse_url($url, PHP_URL_HOST);
+        if (! is_string($host) || $host === '') {
+            return null;
+        }
+        $host = strtolower($host);
+        if (str_starts_with($host, 'www.')) {
+            $host = substr($host, 4);
+        }
+
+        return $host;
     }
 
     /**

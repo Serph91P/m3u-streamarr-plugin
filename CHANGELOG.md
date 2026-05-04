@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.13.1] - 2026-05-04
+
+### Fixed
+- `plugin.json`: `include_kick_vods` and `kick_use_streamlink_fallback` used `type: toggle`, which the plugin manifest validator rejects. Changed to `type: boolean` (same as the existing Twitch `include_vods` toggle).
+
 ## [1.13.0] - 2026-05-04
 
 ### Added

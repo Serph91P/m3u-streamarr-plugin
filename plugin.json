@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create and remove channels. Per-platform settings groups, with auto-migration of legacy monitored_channels.",
@@ -271,7 +271,7 @@
         {
           "id": "include_kick_vods",
           "label": "Include Kick VODs",
-          "type": "toggle",
+          "type": "boolean",
           "default": false,
           "helper_text": "When on, recent past broadcasts (VODs) for the Kick channels above are added as separate entries."
         },
@@ -295,7 +295,7 @@
         {
           "id": "kick_use_streamlink_fallback",
           "label": "Force Streamlink for Kick",
-          "type": "toggle",
+          "type": "boolean",
           "default": false,
           "helper_text": "When on, the Kick API is bypassed and streamlink is used directly. Useful if the Kick API is consistently blocked by Cloudflare in your environment."
         }

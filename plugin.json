@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create and remove channels. Per-platform settings groups.",
@@ -47,7 +47,7 @@
           "label_attribute": "name",
           "scope": "owned",
           "required": true,
-          "helper_text": "Select a Stream Profile with the 'Streamlink' backend. FFmpeg profiles will NOT work for Twitch streams.\n\n\u26a0 You must first create a Stream Profile under Settings \u2192 Stream Profiles with backend set to 'Streamlink' and quality 'best'. Cookies configured on this profile will also be used for stream detection."
+          "helper_text": "Select a Stream Profile with the 'Streamlink' backend. FFmpeg profiles will NOT work for Twitch streams.\n\n⚠ You must first create a Stream Profile under Settings → Stream Profiles with backend set to 'Streamlink' and quality 'best'. Cookies configured on this profile will also be used for stream detection."
         },
         {
           "id": "target_playlist_id",

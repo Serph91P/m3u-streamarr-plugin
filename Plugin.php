@@ -48,6 +48,48 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
     private ?bool $groupsSortOrderColumnExists = null;
 
+    /**
+     * Plugin-internal source files have already been wired in once per
+     * PHP process — re-wiring is a no-op thanks to require_once, but this
+     * flag avoids hitting the filesystem on every Plugin instantiation.
+     */
+    private static bool $srcLoaded = false;
+
+    public function __construct()
+    {
+        $this->bootSrcFiles();
+    }
+
+    /**
+     * The m3u-editor host only `require_once`s the entrypoint file declared in
+     * plugin.json. Additional source files under `src/` are part of the
+     * integrity-hashed plugin payload but must be wired in by the plugin
+     * itself. Each file is a pure class declaration with no side effects.
+     */
+    private function bootSrcFiles(): void
+    {
+        if (self::$srcLoaded) {
+            return;
+        }
+
+        $base = __DIR__.DIRECTORY_SEPARATOR.'src'.DIRECTORY_SEPARATOR;
+        $files = [
+            'Providers/DTO/MonitoredEntry.php',
+            'Providers/DTO/StreamInfo.php',
+            'Providers/DTO/VodInfo.php',
+            'Providers/PlatformProvider.php',
+            'Providers/ProviderRegistry.php',
+        ];
+        foreach ($files as $relative) {
+            $path = $base.str_replace('/', DIRECTORY_SEPARATOR, $relative);
+            if (is_file($path)) {
+                require_once $path;
+            }
+        }
+
+        self::$srcLoaded = true;
+    }
+
     // -------------------------------------------------------------------------
     // PluginInterface
     // -------------------------------------------------------------------------

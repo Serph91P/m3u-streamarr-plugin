@@ -433,6 +433,93 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 continue;
             }
 
+            // Kick takes the provider-driven path (real API + optional
+            // streamlink fallback for entries the API could not resolve).
+            // YouTube and Generic stay on the inline streamlink probe until
+            // their respective provider classes grow real detection in
+            // later phases.
+            if ($provider->id() === 'kick') {
+                $context->heartbeat("Checking {$provider->displayName()} live streams…", progress: $progressBase);
+                $progressBase = min(89, $progressBase + 1);
+
+                /** @var Providers\KickProvider $kickProvider */
+                $kickProvider = $provider;
+                $kickEntries = [];
+                foreach ($urls as $url) {
+                    $entry = $kickProvider->parseEntry($url);
+                    if ($entry) {
+                        $kickEntries[] = $entry;
+                    }
+                }
+
+                $apiResults = [];
+                if (! empty($kickEntries)) {
+                    $apiResults = $kickProvider->detectLive($kickEntries, $settings, $cookiesFile);
+                }
+                $fallbackUrls = $kickProvider->getPendingFallback();
+
+                foreach ($urls as $url) {
+                    $info = $apiResults[$url] ?? null;
+
+                    if ($info === null && in_array($url, $fallbackUrls, true)) {
+                        $streamlink = $streamlink ?? $this->findStreamlink();
+                        if (! $streamlink) {
+                            $context->warning("streamlink not found. Kick fallback for {$url} skipped.");
+                            continue;
+                        }
+                        $context->heartbeat("Checking Kick fallback: {$url}…");
+                        $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $url, $cookiesFile);
+                    }
+
+                    if ($info) {
+                        try {
+                            $wasNew = $this->createOrUpdateGenericChannel($info, $settings, $userId, $context, 'kick');
+                            if ($wasNew) {
+                                $added++;
+                            } else {
+                                $updated++;
+                            }
+                        } catch (\Throwable $e) {
+                            $context->error("Kick {$url}: failed - {$e->getMessage()}");
+                            $errors[] = "Kick {$url}: {$e->getMessage()}";
+                        }
+                    } else {
+                        $context->info("Kick not live: {$url}");
+                    }
+                }
+
+                // Optional Kick VOD discovery (independent of Twitch's include_vods).
+                if (($settings['include_kick_vods'] ?? false) && ! empty($kickEntries)) {
+                    $kickVodLimit = max(1, min(50, (int) ($settings['max_kick_vods_per_channel'] ?? 5)));
+                    $context->heartbeat('Fetching Kick VODs…', progress: min(89, $progressBase + 1));
+
+                    foreach ($kickEntries as $entry) {
+                        try {
+                            $vods = $kickProvider->listVods($entry, $kickVodLimit, $settings);
+                        } catch (\Throwable $e) {
+                            $context->warning("Kick VOD listing failed for {$entry->label}: {$e->getMessage()}");
+                            continue;
+                        }
+
+                        foreach ($vods as $vod) {
+                            try {
+                                $wasNew = $this->createOrUpdateKickVod($vod, $entry, $settings, $userId, $context);
+                                if ($wasNew) {
+                                    $added++;
+                                } else {
+                                    $skipped++;
+                                }
+                            } catch (\Throwable $e) {
+                                $context->error("Kick VOD {$vod->vodId}: failed - {$e->getMessage()}");
+                                $errors[] = "Kick VOD {$vod->vodId}: {$e->getMessage()}";
+                            }
+                        }
+                    }
+                }
+
+                continue;
+            }
+
             $streamlink = $streamlink ?? $this->findStreamlink();
             if (! $streamlink) {
                 $context->warning("streamlink not found. {$provider->displayName()} streams cannot be checked. Install streamlink to enable monitoring for the remaining platforms.");
@@ -1646,6 +1733,79 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         ]);
 
         $context->info("{$platform} added: {$monitoredUrl}. '{$title}' (ch #{$channel->channel})");
+
+        return true;
+    }
+
+    /**
+     * Persist a Kick VOD as its own Channel row. Mirrors the Twitch VOD
+     * pattern but uses the streamlink_* / kick_* info keys so cleanup and
+     * grouping logic treats it as a generic VOD, not a Twitch VOD.
+     */
+    private function createOrUpdateKickVod(
+        \AppLocalPlugins\Streamarr\Providers\DTO\VodInfo $vod,
+        \AppLocalPlugins\Streamarr\Providers\DTO\MonitoredEntry $entry,
+        array $settings,
+        int $userId,
+        PluginExecutionContext $context,
+    ): bool {
+        $platformId = 'kick';
+        $platformLabel = 'Kick';
+
+        /** @var Channel|null $existing */
+        $existing = Channel::where('user_id', $userId)
+            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+            ->whereJsonContains('info->kick_vod_id', $vod->vodId)
+            ->first();
+
+        if ($existing) {
+            return false;
+        }
+
+        $vodGroupOverride = trim((string) ($settings['kick_vod_group'] ?? ''));
+        $groupName = $vodGroupOverride !== ''
+            ? $vodGroupOverride
+            : ($this->resolveGroupForPlatform($platformId, $settings).' VODs');
+
+        /** @var \App\Models\Group $groupModel */
+        $groupModel = \App\Models\Group::firstOrCreate(
+            ['user_id' => $userId, 'name' => $groupName],
+            ['user_id' => $userId, 'name' => $groupName],
+        );
+
+        $channelNumber = $this->nextChannelNumber($userId, $settings, $platformId.'-vod-'.$vod->vodId, null);
+        $title = $vod->title !== '' ? $vod->title : ($entry->label.' - VOD');
+
+        $infoCol = [
+            'plugin' => self::PLUGIN_MARKER,
+            'streamlink_stream_type' => self::STREAM_TYPE_VOD,
+            'streamlink_monitored_url' => $vod->url,
+            'streamlink_platform' => $platformLabel,
+            'streamlink_title' => $title,
+            'streamlink_author' => $entry->label,
+            'streamlink_category' => $vod->category ?? '',
+            'streamlink_id' => $vod->vodId,
+            'kick_vod_id' => $vod->vodId,
+            'kick_slug' => $entry->extras['slug'] ?? $entry->label,
+            'kick_vod_published_at' => $vod->publishedAt,
+            'kick_vod_duration_secs' => $vod->durationSeconds,
+            'kick_vod_thumbnail' => $vod->thumbnailUrl,
+        ];
+
+        $channel = Channel::create([
+            'user_id' => $userId,
+            'title' => $title,
+            'name' => $title,
+            'url' => $vod->url,
+            'group_id' => $groupModel->id,
+            'channel' => $channelNumber,
+            'is_active' => true,
+            'is_vod' => true,
+            'info' => $infoCol,
+            'logo_internal' => $vod->thumbnailUrl ?? '',
+        ]);
+
+        $context->info("Kick VOD added: {$entry->label} - '{$title}' (ch #{$channel->channel})");
 
         return true;
     }

@@ -1,7 +1,7 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.8.0-dev",
+  "version": "1.9.0",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
   "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create and remove channels. Per-platform settings groups.",

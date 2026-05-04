@@ -1738,15 +1738,19 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return false;
         }
 
-        // Resolve playlist target so we satisfy the NOT NULL playlist_id FK on `groups`.
+        // Resolve playlist target: regular playlist takes precedence; otherwise
+        // fall back to custom_playlist (tagging instead of group_id).
         $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
         $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
-        $groupModel = $this->resolveOrCreateGroup($group, $userId, $playlistId, $customPlaylistId);
-        if (! $groupModel) {
-            $context->error("YouTube cannot create channel for {$monitoredUrl}: no target playlist configured (target_playlist_id is required to create groups).");
+
+        if (! $playlistId && ! $customPlaylistId) {
+            $context->error("YouTube cannot create channel for {$monitoredUrl}: no target_playlist_id or target_custom_playlist_id configured.");
 
             return false;
         }
+
+        $groupModel = $this->resolveOrCreateGroup($group, $userId, $playlistId, $customPlaylistId);
+        [$customPlaylist, $groupTag] = $this->resolveCustomPlaylistGroupTag($customPlaylistId, $group);
 
         $channelNumber = $this->nextChannelNumber($userId, $settings, 'youtube', null);
 
@@ -1769,13 +1773,20 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'title' => $title,
             'name' => $title,
             'url' => $streamUrl,
-            'group_id' => $groupModel->id,
+            'group_id' => $groupModel?->id,
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
             'is_active' => true,
             'info' => $info,
         ]);
+
+        if (! $playlistId && $customPlaylist) {
+            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+            if ($groupTag) {
+                $channel->attachTag($groupTag);
+            }
+        }
 
         $context->info("YouTube added: {$monitoredUrl}. '{$title}' (ch #{$channel->channel})");
 
@@ -1831,12 +1842,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
         $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
-        $groupModel = $this->resolveOrCreateGroup($group, $userId, $playlistId, $customPlaylistId);
-        if (! $groupModel) {
-            $context->error("{$platform} cannot create channel for {$monitoredUrl}: no target playlist configured (target_playlist_id is required to create groups).");
+
+        if (! $playlistId && ! $customPlaylistId) {
+            $context->error("{$platform} cannot create channel for {$monitoredUrl}: no target_playlist_id or target_custom_playlist_id configured.");
 
             return false;
         }
+
+        $groupModel = $this->resolveOrCreateGroup($group, $userId, $playlistId, $customPlaylistId);
+        [$customPlaylist, $groupTag] = $this->resolveCustomPlaylistGroupTag($customPlaylistId, $group);
 
         $channelNumber = $this->nextChannelNumber($userId, $settings, strtolower($platform), null);
 
@@ -1856,13 +1870,20 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'title' => $title,
             'name' => $title,
             'url' => $monitoredUrl,
-            'group_id' => $groupModel->id,
+            'group_id' => $groupModel?->id,
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
             'is_active' => true,
             'info' => $infoCol,
         ]);
+
+        if (! $playlistId && $customPlaylist) {
+            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+            if ($groupTag) {
+                $channel->attachTag($groupTag);
+            }
+        }
 
         $context->info("{$platform} added: {$monitoredUrl}. '{$title}' (ch #{$channel->channel})");
 
@@ -1901,12 +1922,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
         $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
         $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
-        $groupModel = $this->resolveOrCreateGroup($groupName, $userId, $playlistId, $customPlaylistId);
-        if (! $groupModel) {
-            $context->error("{$platformLabel} VOD cannot create channel for {$entry->raw}: no target playlist configured (target_playlist_id is required to create groups).");
+
+        if (! $playlistId && ! $customPlaylistId) {
+            $context->error("{$platformLabel} VOD cannot create channel for {$entry->raw}: no target_playlist_id or target_custom_playlist_id configured.");
 
             return false;
         }
+
+        $groupModel = $this->resolveOrCreateGroup($groupName, $userId, $playlistId, $customPlaylistId);
+        [$customPlaylist, $groupTag] = $this->resolveCustomPlaylistGroupTag($customPlaylistId, $groupName);
 
         $channelNumber = $this->nextChannelNumber($userId, $settings, $platformId.'-vod-'.$vod->vodId, null);
         $title = $vod->title !== '' ? $vod->title : ($entry->label.' - VOD');
@@ -1932,7 +1956,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'title' => $title,
             'name' => $title,
             'url' => $vod->url,
-            'group_id' => $groupModel->id,
+            'group_id' => $groupModel?->id,
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
@@ -1941,6 +1965,13 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'info' => $infoCol,
             'logo_internal' => $vod->thumbnailUrl ?? '',
         ]);
+
+        if (! $playlistId && $customPlaylist) {
+            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+            if ($groupTag) {
+                $channel->attachTag($groupTag);
+            }
+        }
 
         $context->info("Kick VOD added: {$entry->label} - '{$title}' (ch #{$channel->channel})");
 
@@ -2756,11 +2787,35 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return $group;
         }
 
-        if ($customPlaylistId) {
-            return null;
+        // custom_playlist mode does not use Groups; tagging happens on the channel.
+        return null;
+    }
+
+    /**
+     * Resolve a CustomPlaylist + Tag pair for the given group name when the user
+     * targets a custom playlist instead of a regular playlist. Returns
+     * [CustomPlaylist|null, Tag|null] for downstream sync/attach.
+     *
+     * @return array{0: ?CustomPlaylist, 1: ?Tag}
+     */
+    private function resolveCustomPlaylistGroupTag(?int $customPlaylistId, string $groupName): array
+    {
+        if (! $customPlaylistId) {
+            return [null, null];
         }
 
-        return null;
+        $customPlaylist = CustomPlaylist::find($customPlaylistId);
+        if (! $customPlaylist || empty($customPlaylist->uuid)) {
+            return [$customPlaylist, null];
+        }
+
+        $groupTag = $customPlaylist->groupTags()->where('name->en', $groupName)->first();
+        if (! $groupTag) {
+            $groupTag = Tag::create(['name' => ['en' => $groupName], 'type' => $customPlaylist->uuid]);
+            $customPlaylist->attachTag($groupTag);
+        }
+
+        return [$customPlaylist, $groupTag];
     }
 
     private function ensureGroupVisibleInClients(Group $group): void

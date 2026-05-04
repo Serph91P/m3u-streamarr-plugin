@@ -14,7 +14,7 @@ class ProviderRegistry
     /** @var array<string,PlatformProvider> keyed by provider id */
     private array $providers = [];
 
-    /** @var string[] insertion order — preserved for matches() probing */
+    /** @var string[] insertion order. preserved for matches() probing */
     private array $order = [];
 
     public function register(PlatformProvider $provider): void

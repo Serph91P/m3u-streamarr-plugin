@@ -10,14 +10,14 @@ use AppLocalPlugins\Streamarr\Streamlink\StreamlinkRunner;
 use Carbon\Carbon;
 
 /**
- * YouTube provider — detects live streams by probing
+ * YouTube provider. detects live streams by probing
  * `streamlink --json <url>`. There is no batch API; detectLive() loops one
  * URL at a time. The orchestrator's concurrency pool fans these out.
  *
  * Accepted line formats:
- *   - https://www.youtube.com/@handle           → normalised to .../@handle/live
- *   - https://www.youtube.com/channel/UCxxx     → normalised to .../channel/UCxxx/live
- *   - https://www.youtube.com/c/slug            → normalised to .../c/slug/live
+ *   - https://www.youtube.com/@handle           → normalised to ./@handle/live
+ *   - https://www.youtube.com/channel/UCxxx     → normalised to ./channel/UCxxx/live
+ *   - https://www.youtube.com/c/slug            → normalised to ./c/slug/live
  *   - https://www.youtube.com/watch?v=VIDEOID
  *   - https://youtu.be/VIDEOID
  *   - URLs already ending in /live
@@ -147,7 +147,7 @@ class YouTubeProvider implements PlatformProvider
             return '';
         }
 
-        // Already pointing at a live page or specific video — leave alone.
+        // Already pointing at a live page or specific video. leave alone.
         if (str_contains($url, '/live') || str_contains($url, 'watch?v=') || str_contains($url, 'youtu.be/')) {
             return $url;
         }

@@ -50,7 +50,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
     /**
      * Plugin-internal source files have already been wired in once per
-     * PHP process — re-wiring is a no-op thanks to require_once, but this
+     * PHP process. re-wiring is a no-op thanks to require_once, but this
      * flag avoids hitting the filesystem on every Plugin instantiation.
      */
     private static bool $srcLoaded = false;
@@ -409,7 +409,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $streamlink = $streamlink ?? $this->findStreamlink();
 
             if (! $streamlink) {
-                $context->warning('streamlink not found — YouTube live streams cannot be checked. Install streamlink to enable YouTube monitoring.');
+                $context->warning('streamlink not found. YouTube live streams cannot be checked. Install streamlink to enable YouTube monitoring.');
             } else {
                 $context->heartbeat('Checking YouTube live streams…', progress: 83);
 
@@ -439,19 +439,19 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         // --- Detect generic streamlink-supported live streams ---
         // Catch-all for every platform streamlink can resolve that isn't Twitch
         // or YouTube: Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
-        // AfreecaTV, Mildom, etc. We don't pre-validate the host — streamlink
+        // AfreecaTV, Mildom, etc. We don't pre-validate the host. streamlink
         // either returns a stream JSON or it doesn't.
         if (! empty($genericUrls)) {
             $streamlink = $streamlink ?? $this->findStreamlink();
 
             if (! $streamlink) {
-                $context->warning('streamlink not found — generic stream URLs cannot be checked. Install streamlink to enable Kick / Vimeo / BiliBili / Rumble / etc. monitoring.');
+                $context->warning('streamlink not found. generic stream URLs cannot be checked. Install streamlink to enable Kick / Vimeo / BiliBili / Rumble / etc. monitoring.');
             } else {
                 $context->heartbeat('Checking generic live streams…', progress: 86);
 
                 foreach ($genericUrls as $genericUrl) {
                     $context->heartbeat("Checking: {$genericUrl}…");
-                    // checkYouTubeLiveViaStreamlink is platform-agnostic — it
+                    // checkYouTubeLiveViaStreamlink is platform-agnostic. it
                     // just runs `streamlink --json <url>` and parses metadata.
                     $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $genericUrl, $cookiesFile);
 
@@ -821,7 +821,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             }
 
             return PluginActionResult::success(
-                "Stream is NOT live or URL not supported: {$url}" . ($errorMsg ? " — {$errorMsg}" : ''),
+                "Stream is NOT live or URL not supported: {$url}" . ($errorMsg ? ". {$errorMsg}" : ''),
                 [
                     'live' => false,
                     'url' => $url,
@@ -1528,7 +1528,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $existing->info = $info;
             $existing->save();
 
-            $context->info("YouTube updated: {$monitoredUrl} — '{$title}'");
+            $context->info("YouTube updated: {$monitoredUrl}. '{$title}'");
 
             return false;
         }
@@ -1567,7 +1567,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'info' => $info,
         ]);
 
-        $context->info("YouTube added: {$monitoredUrl} — '{$title}' (ch #{$channel->channel})");
+        $context->info("YouTube added: {$monitoredUrl}. '{$title}' (ch #{$channel->channel})");
 
         return true;
     }
@@ -1575,7 +1575,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     /**
      * Create or update a channel for any non-Twitch / non-YouTube platform that
      * streamlink can resolve (Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP,
-     * DLive, AfreecaTV, Mildom, …). Mirrors createOrUpdateYouTubeChannel — the
+     * DLive, AfreecaTV, Mildom, …). Mirrors createOrUpdateYouTubeChannel. the
      * monitored URL is the stable identity, the resolved HLS stream is computed
      * by m3u-proxy / streamlink at playback time.
      *
@@ -1610,7 +1610,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             $existing->info = $infoCol;
             $existing->save();
 
-            $context->info("{$platform} updated: {$monitoredUrl} — '{$title}'");
+            $context->info("{$platform} updated: {$monitoredUrl}. '{$title}'");
 
             return false;
         }
@@ -1645,7 +1645,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'info' => $infoCol,
         ]);
 
-        $context->info("{$platform} added: {$monitoredUrl} — '{$title}' (ch #{$channel->channel})");
+        $context->info("{$platform} added: {$monitoredUrl}. '{$title}' (ch #{$channel->channel})");
 
         return true;
     }
@@ -1851,7 +1851,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             foreach ($response->json('data', []) as $user) {
                 $login = strtolower($user['login'] ?? '');
                 if ($login) {
-                    // Downsize to 70x70 — sufficient for channel logos and saves bandwidth
+                    // Downsize to 70x70. sufficient for channel logos and saves bandwidth
                     $profileImage = $user['profile_image_url'] ?? '';
                     if ($profileImage !== '') {
                         $profileImage = preg_replace('#-\d+x\d+\.#', '-70x70.', $profileImage);
@@ -2119,7 +2119,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return null;
         }
 
-        // streamlink --json returns {"error": "..."} when not live / not found
+        // streamlink --json returns {"error": "."} when not live / not found
         if (isset($json['error'])) {
             return null;
         }
@@ -2191,7 +2191,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
             // Best match: Twitch profile image URL (contains "profile_image" in the CDN path)
             if (preg_match('#https://static-cdn\.jtvnw\.net/jtv_user_pictures/[^"\'\s]+profile_image[^"\'\s]*#', $html, $m)) {
-                // Downsize to 70x70 — sufficient for channel logos and saves bandwidth
+                // Downsize to 70x70. sufficient for channel logos and saves bandwidth
                 return preg_replace('#-\d+x\d+\.#', '-70x70.', $m[0]);
             }
 
@@ -2528,12 +2528,12 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 continue;
             }
 
-            // Skip YouTube URLs — handled separately
+            // Skip YouTube URLs. handled separately
             if ($this->isYouTubeUrl($line)) {
                 continue;
             }
 
-            // Skip any other http(s):// URL — handled by the generic streamlink path.
+            // Skip any other http(s):// URL. handled by the generic streamlink path.
             // Twitch website URLs (https://www.twitch.tv/xqc) currently fall through
             // here too; users should use the bare login form instead.
             if (preg_match('#^https?://#i', $line)) {
@@ -2549,7 +2549,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             } else {
                 // Last-resort: if the line still looks like a plain word, treat it as
                 // a Twitch login. Anything that clearly isn't (slashes, spaces, etc.)
-                // is silently dropped — better than sending garbage to Helix.
+                // is silently dropped. better than sending garbage to Helix.
                 $clean = strtolower(trim($line));
                 if ($clean !== '' && preg_match('/^[\w.-]+$/', $clean)) {
                     $login = $clean;
@@ -2609,7 +2609,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     /**
      * Parse the monitored_channels textarea and return URLs that should be
      * handled by the generic streamlink provider (anything that isn't Twitch
-     * or YouTube — Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
+     * or YouTube. Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
      * AfreecaTV, Mildom, etc.).
      *
      * @return list<string>
@@ -2645,7 +2645,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      * - /channel/ID   → https://www.youtube.com/channel/ID/live
      * - /c/slug       → https://www.youtube.com/c/slug/live
      * - URLs already ending in /live → returned as-is
-     * - youtu.be/xxx  → returned as-is (video/live ID — cannot append /live)
+     * - youtu.be/xxx  → returned as-is (video/live ID. cannot append /live)
      * - watch?v=      → returned as-is
      */
     private function normalizeYouTubeUrl(string $url): string
@@ -2946,7 +2946,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
 
             // Game mode: each game change becomes a separate programme entry
             if (empty($history)) {
-                // No history yet — create a single programme spanning to maxDate
+                // No history yet. create a single programme spanning to maxDate
                 $history = [[
                     'game' => $currentGame,
                     'game_box_art' => $currentGameArt,

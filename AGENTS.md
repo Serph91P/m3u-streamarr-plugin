@@ -9,7 +9,7 @@ This repository builds the `streamarr` plugin for `m3u-editor`.
 - Keep runtime files reviewable and minimal.
 - Do not widen manifest permissions without updating the README and release notes.
 - Package only runtime files for release artifacts.
-- The plugin uses no custom database tables — channel tracking is via `Channel.info->plugin = 'streamarr'`.
+- The plugin uses no custom database tables. channel tracking is via `Channel.info->plugin = 'streamarr'`.
 
 ## Security
 
@@ -18,12 +18,12 @@ This repository builds the `streamarr` plugin for `m3u-editor`.
 - `network_egress` is required for Twitch Helix API calls and streamlink subprocess outbound connections.
 - `filesystem_write` is required for temporary cookie files during plugin runs.
 - Cookies are written to temp files during plugin runs and deleted before the action handler returns. Never persist cookies to permanent storage.
-- Twitch API credentials (client_id, client_secret) are stored in plugin settings — never log them.
+- Twitch API credentials (client_id, client_secret) are stored in plugin settings. never log them.
 
 ## Streamlink subprocess
 
 - All streamlink calls go through `runProcess()` which uses the Laravel Process facade with an explicit timeout.
-- `findStreamlink()` checks common paths — do not hardcode `/usr/bin/streamlink`.
+- `findStreamlink()` checks common paths. do not hardcode `/usr/bin/streamlink`.
 
 ## Twitch API
 

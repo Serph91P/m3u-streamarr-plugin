@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.2.0] - 2026-05-04
+
+### Added
+- YouTube multi live support: a single monitored channel/handle URL that is
+  broadcasting multiple concurrent live streams (e.g. main + secondary cam,
+  multi-language sims, sports multiviews) now produces one channel row per
+  broadcast instead of only the first one. Channel identity switched from
+  `info.youtube_monitored_url` to `info.youtube_id` (videoId) so siblings
+  no longer collide. When two or more siblings exist for the same monitored
+  URL their titles are auto-prefixed with `{author} - ` for disambiguation;
+  legacy single-live rows keep their existing titles. Cleanup matches each
+  channel's stored `youtube_id` against the live list returned for its
+  monitored URL, so ended siblings are removed individually. Quota cost is
+  unchanged: search.list always charges 100 units regardless of
+  `maxResults`.
+
 ## [2.1.0] - 2026-05-04
 
 ### Added

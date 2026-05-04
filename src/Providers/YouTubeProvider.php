@@ -104,9 +104,14 @@ class YouTubeProvider extends BaseProvider
      * Detect live status. Empty API key triggers full streamlink fallback
      * (every URL pushed to pendingFallback, return []).
      *
+     * Return shape: each monitored URL maps to a LIST of live broadcasts
+     * (one entry per concurrent live video for the URL). Empty list means
+     * confirmed offline; absence from the map means the URL was pushed to
+     * the streamlink fallback bucket.
+     *
      * @param  MonitoredEntry[]  $entries
      * @param  array<string,mixed>  $settings
-     * @return array<string,array{url:string,title:string,author:string,category:string,id:string}>
+     * @return array<string,list<array{url:string,title:string,author:string,category:string,id:string}>>
      */
     public function detectLive(array $entries, array $settings, ?string $cookiesFile): array
     {
@@ -183,7 +188,7 @@ class YouTubeProvider extends BaseProvider
                     continue;
                 }
                 if ($info !== null) {
-                    $results[$url] = $info;
+                    $results[$url][] = $info;
                 }
                 // info === null and no error => confirmed offline (do not emit, do not fall back).
                 continue;
@@ -231,7 +236,7 @@ class YouTubeProvider extends BaseProvider
             }
             $apiCallIndex++;
 
-            [$info, $error] = $this->fetchLiveSearch($apiKey, $channelId, $url);
+            [$infos, $error] = $this->fetchLiveSearch($apiKey, $channelId, $url);
             if ($error === 'quotaExceeded') {
                 $quotaExhausted = true;
                 Log::warning('streamarr: YouTube Data API quota exceeded; falling back to streamlink for remaining URLs.');
@@ -252,10 +257,10 @@ class YouTubeProvider extends BaseProvider
                 $this->pendingFallback[] = $url;
                 continue;
             }
-            if ($info !== null) {
-                $results[$url] = $info;
+            foreach ($infos as $info) {
+                $results[$url][] = $info;
             }
-            // info === null => confirmed offline.
+            // empty $infos => confirmed offline.
         }
 
         return $results;
@@ -359,7 +364,11 @@ class YouTubeProvider extends BaseProvider
     /**
      * search.list?part=snippet&channelId={id}&eventType=live&type=video  (100 units)
      *
-     * @return array{0: ?array{url:string,title:string,author:string,category:string,id:string}, 1: ?string}
+     * Returns ALL concurrently live broadcasts for the channel (up to 10).
+     * search.list cost is fixed at 100 units regardless of maxResults, so
+     * widening from 1 to 10 is free quota-wise.
+     *
+     * @return array{0: list<array{url:string,title:string,author:string,category:string,id:string}>, 1: ?string}
      */
     private function fetchLiveSearch(string $apiKey, string $channelId, string $url): array
     {
@@ -372,34 +381,45 @@ class YouTubeProvider extends BaseProvider
                 'channelId' => $channelId,
                 'eventType' => 'live',
                 'type' => 'video',
-                'maxResults' => 1,
+                'maxResults' => 10,
                 'key' => $apiKey,
             ]);
         } catch (\Throwable) {
-            return [null, 'other'];
+            return [[], 'other'];
         }
 
         $err = $this->classifyError($response);
         if ($err !== null) {
-            return [null, $err];
+            return [[], $err];
         }
 
         $json = $response->json();
-        if (! is_array($json) || empty($json['items']) || ! is_array($json['items'][0])) {
-            return [null, null]; // Confirmed offline.
+        if (! is_array($json) || empty($json['items']) || ! is_array($json['items'])) {
+            return [[], null]; // Confirmed offline.
         }
 
-        $item = $json['items'][0];
-        $snippet = $item['snippet'] ?? [];
-        $vid = (string) ($item['id']['videoId'] ?? '');
+        $infos = [];
+        foreach ($json['items'] as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $snippet = $item['snippet'] ?? [];
+            $vid = (string) ($item['id']['videoId'] ?? '');
+            if ($vid === '') {
+                continue;
+            }
+            $infos[] = [
+                // Point at the actual watch URL so streamlink/m3u-proxy can
+                // play this specific broadcast directly.
+                'url' => 'https://www.youtube.com/watch?v='.$vid,
+                'title' => (string) ($snippet['title'] ?? ''),
+                'author' => (string) ($snippet['channelTitle'] ?? ''),
+                'category' => '',
+                'id' => $vid,
+            ];
+        }
 
-        return [[
-            'url' => $url,
-            'title' => (string) ($snippet['title'] ?? ''),
-            'author' => (string) ($snippet['channelTitle'] ?? ''),
-            'category' => '',
-            'id' => $vid,
-        ], null];
+        return [$infos, null];
     }
 
     /**

@@ -545,9 +545,16 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 $fallbackUrls = $ytProvider->getPendingFallback();
 
                 foreach ($urls as $url) {
-                    $info = $apiResults[$url] ?? null;
+                    $infos = $apiResults[$url] ?? null;
 
-                    if ($info === null && in_array($url, $fallbackUrls, true)) {
+                    // API key set, URL not in fallback bucket, no entries =>
+                    // confirmed offline by API.
+                    if ($infos !== null && $infos === []) {
+                        $context->info("YouTube not live: {$url}");
+                        continue;
+                    }
+
+                    if ($infos === null && in_array($url, $fallbackUrls, true)) {
                         $streamlink = $streamlink ?? $this->findStreamlink();
                         if (! $streamlink) {
                             $context->warning("streamlink not found. YouTube fallback for {$url} skipped.");
@@ -555,11 +562,18 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                         }
                         $context->heartbeat("Checking YouTube fallback: {$url}…");
                         $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $url, $cookiesFile);
+                        $infos = $info ? [$info] : [];
                     }
 
-                    if ($info) {
+                    if (empty($infos)) {
+                        $context->info("YouTube not live: {$url}");
+                        continue;
+                    }
+
+                    $multi = count($infos) > 1;
+                    foreach ($infos as $info) {
                         try {
-                            $wasNew = $this->createOrUpdateYouTubeChannel($info, $settings, $userId, $context);
+                            $wasNew = $this->createOrUpdateYouTubeChannel($info, $settings, $userId, $context, $url, $multi);
                             if ($wasNew) {
                                 $added++;
                             } else {
@@ -569,8 +583,6 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                             $context->error("YouTube {$url}: failed - {$e->getMessage()}");
                             $errors[] = "YouTube {$url}: {$e->getMessage()}";
                         }
-                    } else {
-                        $context->info("YouTube not live: {$url}");
                     }
                 }
 
@@ -1632,24 +1644,51 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 if ($ytUrl === '') {
                     continue;
                 }
+                $ytId = (string) data_get($channel->info, 'youtube_id', '');
 
                 // Decide whether this URL was answered by the API. A URL is
-                // "API-answered" when a key is configured AND it did not land in
-                // the fallback bucket. apiResults only contains live entries,
-                // so absence means offline-per-API.
-                $apiAnsweredOffline = $apiKey !== ''
+                // "API-answered" when a key is configured AND it did not land
+                // in the fallback bucket. apiResults entries are lists of live
+                // broadcasts; an empty list (or no key) means offline-per-API.
+                $urlLiveList = $apiResults[$ytUrl] ?? null;
+                $apiAnswered = $apiKey !== ''
                     && ! in_array($ytUrl, $fallbackUrls, true)
-                    && ! array_key_exists($ytUrl, $apiResults);
+                    && $urlLiveList !== null;
 
-                $info = $apiResults[$ytUrl] ?? null;
+                $info = null;
+                $apiAnsweredOffline = false;
+
+                if ($apiAnswered) {
+                    // Match this channel's videoId against the live list for
+                    // its monitored URL. If videoId is empty (legacy row that
+                    // never recorded one) and only one live exists, accept it.
+                    if ($ytId !== '') {
+                        foreach ($urlLiveList as $candidate) {
+                            if ((string) ($candidate['id'] ?? '') === $ytId) {
+                                $info = $candidate;
+                                break;
+                            }
+                        }
+                    } elseif (count($urlLiveList) === 1) {
+                        $info = $urlLiveList[0];
+                    }
+                    $apiAnsweredOffline = $info === null;
+                }
 
                 // Streamlink probe runs when:
                 //   - no API key (or every URL fell back), or
                 //   - this URL fell back, or
-                //   - API said offline (be conservative: confirm before
-                //     deleting so a transient quota error / 5xx doesn't
-                //     wipe a still-live channel).
-                if ($info === null && isset($streamlink) && $streamlink) {
+                //   - API said offline (be conservative for the SINGLE-live
+                //     case: confirm before deleting so a transient quota
+                //     error / 5xx doesn't wipe a still-live channel). For
+                //     multi-live API responses we trust the API: streamlink
+                //     can only see one stream per URL and would falsely keep
+                //     ended siblings alive.
+                $shouldProbeStreamlink = $info === null
+                    && isset($streamlink) && $streamlink
+                    && ! ($apiAnsweredOffline && count($urlLiveList ?? []) > 0);
+
+                if ($shouldProbeStreamlink) {
                     $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $ytUrl, $cookiesFile);
                 }
 
@@ -1702,7 +1741,15 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     /**
      * Create or update a channel for a live YouTube stream.
      *
+     * Identity: $ytInfo['id'] (videoId) when present, else $ytInfo['url']
+     * (legacy fallback). $monitoredUrl is the originally monitored channel/
+     * handle URL and is persisted as info.youtube_monitored_url so cleanup
+     * can group sibling broadcasts. When $multi is true, sibling lives exist
+     * for the same monitored URL: title is prefixed with "{author} - " and
+     * the existing sibling is back-rewritten on first collision.
+     *
      * @param  array{url: string, title: string, author: string, category: string, id: string}  $ytInfo
+     * @param  string|null  $monitoredUrl  Originally monitored URL; defaults to $ytInfo['url'].
      * @return bool True if a new channel was created, false if an existing one was updated.
      */
     private function createOrUpdateYouTubeChannel(
@@ -1710,32 +1757,92 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         array $settings,
         int $userId,
         PluginExecutionContext $context,
+        ?string $monitoredUrl = null,
+        bool $multi = false,
     ): bool {
-        $monitoredUrl = $ytInfo['url'];
+        $monitoredUrl = $monitoredUrl ?? $ytInfo['url'];
+        $videoId = (string) ($ytInfo['id'] ?? '');
         $group = $this->resolveGroupForPlatform('youtube', $settings);
 
+        // Identity: prefer videoId so multiple concurrent lives for the same
+        // channel each get their own row. Fall back to monitored URL match for
+        // legacy rows that were created before videoId was the identity key
+        // (or when streamlink fallback yields no id).
         /** @var Channel|null $existing */
-        $existing = Channel::where('user_id', $userId)
-            ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
-            ->whereJsonContains('info->youtube_monitored_url', $monitoredUrl)
-            ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
-            ->first();
+        $existing = null;
+        if ($videoId !== '') {
+            $existing = Channel::where('user_id', $userId)
+                ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+                ->whereJsonContains('info->youtube_id', $videoId)
+                ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
+                ->first();
+        }
+        if (! $existing) {
+            // Legacy / fallback path: match by monitored URL but only when
+            // there is at most one live row for that URL (otherwise we cannot
+            // tell siblings apart).
+            $candidates = Channel::where('user_id', $userId)
+                ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+                ->whereJsonContains('info->youtube_monitored_url', $monitoredUrl)
+                ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
+                ->get();
 
-        $title = $ytInfo['title'] ?: ($ytInfo['author'] ?: 'YouTube Live');
+            if ($candidates->count() === 1) {
+                $existing = $candidates->first();
+            } elseif ($candidates->count() > 1 && $videoId !== '') {
+                // Multiple legacy siblings: pick the one whose stored
+                // youtube_id matches, if any.
+                $existing = $candidates->first(fn ($c) => (string) data_get($c->info, 'youtube_id', '') === $videoId);
+            }
+        }
+
+        $rawTitle = $ytInfo['title'] ?: ($ytInfo['author'] ?: 'YouTube Live');
+        $author = (string) ($ytInfo['author'] ?? '');
+        $title = ($multi && $author !== '' && stripos($rawTitle, $author) === false)
+            ? "{$author} - {$rawTitle}"
+            : $rawTitle;
 
         if ($existing) {
             $info = $existing->info ?? [];
             $info['youtube_title'] = $ytInfo['title'];
             $info['youtube_author'] = $ytInfo['author'];
             $info['youtube_category'] = $ytInfo['category'];
+            // Backfill identity fields for legacy rows.
+            if ($videoId !== '') {
+                $info['youtube_id'] = $videoId;
+            }
+            $info['youtube_monitored_url'] = $monitoredUrl;
 
             $existing->title = $title;
+            // Update the stream URL too: for multi-live rows we want each row
+            // to point at its own watch URL (videoId) instead of the channel
+            // URL, so the proxy can resolve the right broadcast.
+            $existing->url = $ytInfo['url'];
             $existing->info = $info;
             $existing->save();
 
             $context->info("YouTube updated: {$monitoredUrl}. '{$title}'");
 
             return false;
+        }
+
+        // First channel for this monitored URL just became "multi" because a
+        // sibling is being added: rewrite the existing single sibling's title
+        // to also include its author prefix so the UI is unambiguous.
+        if ($multi) {
+            $sibling = Channel::where('user_id', $userId)
+                ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
+                ->whereJsonContains('info->youtube_monitored_url', $monitoredUrl)
+                ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
+                ->first();
+            if ($sibling) {
+                $sibAuthor = (string) data_get($sibling->info, 'youtube_author', '');
+                $sibTitle = (string) data_get($sibling->info, 'youtube_title', $sibling->title);
+                if ($sibAuthor !== '' && stripos($sibling->title, $sibAuthor) === false) {
+                    $sibling->title = "{$sibAuthor} - {$sibTitle}";
+                    $sibling->saveQuietly();
+                }
+            }
         }
 
         // Resolve playlist target: regular playlist takes precedence; otherwise
@@ -1761,12 +1868,14 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'youtube_title' => $ytInfo['title'],
             'youtube_author' => $ytInfo['author'],
             'youtube_category' => $ytInfo['category'],
-            'youtube_id' => $ytInfo['id'],
+            'youtube_id' => $videoId,
         ];
 
-        // Resolve the stream URL for the channel (use the monitored URL directly;
-        // m3u-proxy / streamlink will resolve the actual HLS stream on connection).
-        $streamUrl = $monitoredUrl;
+        // For multi-live: use the actual watch URL (already in $ytInfo['url'])
+        // so the proxy resolves the right broadcast. For single-live legacy
+        // path the watch URL equals the monitored URL anyway when videoId
+        // matched, so this is consistent.
+        $streamUrl = $ytInfo['url'];
 
         $channel = Channel::create([
             'user_id' => $userId,

@@ -1,10 +1,10 @@
 {
   "id": "streamarr",
   "name": "Streamarr",
-  "version": "1.7.0",
+  "version": "1.8.0-dev",
   "api_version": "1.0.0",
   "repository": "Serph91P/m3u-streamarr-plugin",
-  "description": "Monitor Twitch channels and YouTube streams for live content, auto-create/remove channels. Dual detection: Twitch Helix API (fast batch) or streamlink CLI fallback. Supports cookie-based authentication for age-restricted or subscriber-only streams.",
+  "description": "Monitor Twitch, YouTube, Kick and other streamlink-supported platforms for live content (and Twitch VODs); auto-create/remove channels. Per-platform settings groups.",
   "entrypoint": "Plugin.php",
   "class": "AppLocalPlugins\\Streamarr\\Plugin",
   "capabilities": [
@@ -45,7 +45,7 @@
           "type": "textarea",
           "default": "",
           "required": false,
-          "helper_text": "One entry per line. Lines starting with # are ignored.\n\nTwitch: username or username=BaseNumber (for decimal numbering)\n  nightbot\n  pokimane=50\n\nYouTube: full URL to a live channel or stream\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\n\nYouTube detection uses streamlink and supports live streams only. Cookies from the linked Stream Profile are automatically passed to streamlink.\n\n⚠ Without Twitch API credentials, each Twitch channel is checked individually via streamlink. This is slow for more than ~20 channels."
+          "helper_text": "One entry per line. Lines starting with # are ignored.\n\nTwitch: username or username=BaseNumber (for decimal numbering)\n  nightbot\n  pokimane=50\n\nYouTube: full URL to a live channel or stream\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\n\nYouTube detection uses streamlink and supports live streams only. Cookies from the linked Stream Profile are automatically passed to streamlink.\n\n\u26a0 Without Twitch API credentials, each Twitch channel is checked individually via streamlink. This is slow for more than ~20 channels."
         },
         {
           "id": "stream_profile_id",
@@ -55,7 +55,7 @@
           "label_attribute": "name",
           "scope": "owned",
           "required": true,
-          "helper_text": "Select a Stream Profile with the 'Streamlink' backend. FFmpeg profiles will NOT work for Twitch streams.\n\n⚠ You must first create a Stream Profile under Settings → Stream Profiles with backend set to 'Streamlink' and quality 'best'. Cookies configured on this profile will also be used for stream detection."
+          "helper_text": "Select a Stream Profile with the 'Streamlink' backend. FFmpeg profiles will NOT work for Twitch streams.\n\n\u26a0 You must first create a Stream Profile under Settings \u2192 Stream Profiles with backend set to 'Streamlink' and quality 'best'. Cookies configured on this profile will also be used for stream detection."
         },
         {
           "id": "target_playlist_id",
@@ -114,7 +114,7 @@
             "game": "Game / Category (shows game changes as programme entries)",
             "title": "Stream Title (single programme with the stream title)"
           },
-          "helper_text": "Game mode creates a new programme entry each time the streamer switches games. Title mode shows a single continuous programme using the stream title — useful if you prefer all channels under one group with simpler EPG."
+          "helper_text": "Game mode creates a new programme entry each time the streamer switches games. Title mode shows a single continuous programme using the stream title \u2014 useful if you prefer all channels under one group with simpler EPG."
         },
         {
           "id": "live_channel_title_mode",
@@ -288,6 +288,174 @@
           "default": "",
           "required": false,
           "helper_text": "Twitch API Client Secret. Required together with Client ID for API-based detection."
+        }
+      ]
+    },
+    {
+      "id": "platform_twitch",
+      "type": "section",
+      "label": "Twitch (new)",
+      "description": "Per-platform Twitch settings. In v1.8 these will replace the legacy fields above. Username only \u2014 no URL. Helix API recommended for >20 channels.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "twitch_channels",
+          "label": "Twitch Channels",
+          "type": "textarea",
+          "default": "",
+          "required": false,
+          "helper_text": "One Twitch login per line. Decimal numbering supported via username=BaseNumber.\n  nightbot\n  pokimane=50\nLines starting with # are ignored.\n\nIf empty, the plugin falls back to the legacy 'Monitored Channels' field above."
+        },
+        {
+          "id": "twitch_group",
+          "label": "Twitch Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. M3U group-title for Twitch live channels. Leave empty to use the global Channel Group from Core Setup."
+        },
+        {
+          "id": "twitch_include_vods",
+          "label": "Include Twitch VODs",
+          "type": "boolean",
+          "default": false,
+          "required": false,
+          "helper_text": "Create channels for recent VODs of monitored Twitch channels. Requires Twitch API credentials below \u2014 VOD discovery is not available via streamlink."
+        },
+        {
+          "id": "twitch_vod_limit",
+          "label": "Twitch VODs per Channel",
+          "type": "number",
+          "default": 5,
+          "required": false,
+          "helper_text": "Max number of recent VODs per Twitch channel (1-100)."
+        },
+        {
+          "id": "twitch_vod_group",
+          "label": "Twitch VOD Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. M3U group-title for Twitch VOD channels. Leave empty to use the global VOD group / Channel Group fallback."
+        },
+        {
+          "id": "twitch_client_id_new",
+          "label": "Twitch Client ID",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Helix App Access Token Client ID. Create at https://dev.twitch.tv/console/apps \u2014 set OAuth Redirect URL to http://localhost and Category to 'Application Integration'.\n\nWill replace the legacy Twitch API section in v1.8."
+        },
+        {
+          "id": "twitch_client_secret_new",
+          "label": "Twitch Client Secret",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Helix Client Secret from the same app registration. Stored encrypted."
+        }
+      ]
+    },
+    {
+      "id": "platform_youtube",
+      "type": "section",
+      "label": "YouTube (new)",
+      "description": "Per-platform YouTube settings. Detection via streamlink. Cookies from the linked Stream Profile are passed automatically.",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "youtube_channels",
+          "label": "YouTube Channels / Streams",
+          "type": "textarea",
+          "default": "",
+          "required": false,
+          "helper_text": "One YouTube URL per line:\n  https://www.youtube.com/@ChannelHandle\n  https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxx\n  https://www.youtube.com/watch?v=xxxx\nLines starting with # are ignored.\n\nIf empty, the plugin falls back to the legacy 'Monitored Channels' field above."
+        },
+        {
+          "id": "youtube_group_new",
+          "label": "YouTube Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. M3U group-title for YouTube live channels. Leave empty to use the legacy youtube_group / global Channel Group."
+        },
+        {
+          "id": "youtube_include_vods",
+          "label": "Include YouTube VODs",
+          "type": "boolean",
+          "default": false,
+          "required": false,
+          "helper_text": "\u26a0 Not yet implemented. Toggle is reserved for a future release \u2014 YouTube VOD listing requires the YouTube Data API and is planned for v1.9."
+        },
+        {
+          "id": "youtube_vod_limit",
+          "label": "YouTube VODs per Channel",
+          "type": "number",
+          "default": 5,
+          "required": false,
+          "helper_text": "Reserved for future use."
+        },
+        {
+          "id": "youtube_vod_group",
+          "label": "YouTube VOD Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Reserved for future use."
+        }
+      ]
+    },
+    {
+      "id": "platform_kick",
+      "type": "section",
+      "label": "Kick",
+      "description": "Kick.com live streams. Detection via streamlink \u2014 no API key needed. VOD discovery is not supported (Kick has no public listing API).",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "kick_channels",
+          "label": "Kick Channels",
+          "type": "textarea",
+          "default": "",
+          "required": false,
+          "helper_text": "One Kick URL per line:\n  https://kick.com/trainwreckstv\n  https://kick.com/adinross\nLines starting with # are ignored.\n\nFind live channels at https://kick.com/browse/categories"
+        },
+        {
+          "id": "kick_group",
+          "label": "Kick Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. M3U group-title for Kick live channels. Leave empty to use the global Channel Group."
+        }
+      ]
+    },
+    {
+      "id": "platform_generic",
+      "type": "section",
+      "label": "Generic / Other Platforms",
+      "description": "Any other platform that streamlink supports. Full URL per line. Full plugin list: https://streamlink.github.io/plugins.html",
+      "collapsible": true,
+      "collapsed": true,
+      "fields": [
+        {
+          "id": "generic_channels",
+          "label": "Generic Channels",
+          "type": "textarea",
+          "default": "",
+          "required": false,
+          "helper_text": "One URL per line. Examples:\n  https://www.vimeo.com/event/<id>\n  https://rumble.com/<video-id>\n  https://www.bilibili.com/<id>\n  https://dlive.tv/<channel>\n  https://afreecatv.com/<channel>\n  https://trovo.live/s/<channel>\n  https://www.nicovideo.jp/watch/<id>\n  https://ok.ru/live/<id>\n  https://www.huya.com/<id>\n  https://www.douyu.com/<id>\nLines starting with # are ignored.\n\nVOD discovery not supported for Generic platforms \u2014 only live streams.\n\nFull list of supported platforms: https://streamlink.github.io/plugins.html"
+        },
+        {
+          "id": "generic_group",
+          "label": "Generic Group Label",
+          "type": "text",
+          "default": "",
+          "required": false,
+          "helper_text": "Optional. M3U group-title for generic-platform live channels. Leave empty to use the global Channel Group."
         }
       ]
     },

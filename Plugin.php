@@ -149,12 +149,17 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         }
 
         $this->epgMode = $this->resolveEpgMode($settings);
-        $combinedSource = $this->buildCombinedChannelSource($settings);
-        $channelEntries = $this->parseMonitoredChannels($combinedSource);
-        $youTubeUrls = $this->parseMonitoredYouTubeUrls($combinedSource);
-        $genericUrls = $this->parseMonitoredGenericUrls($combinedSource);
 
-        if (empty($channelEntries) && empty($youTubeUrls) && empty($genericUrls)) {
+        // Auto-migrate legacy monitored_channels into per-platform fields.
+        // Mutates $settings in place. Persists to DB on a best-effort basis.
+        $this->migrateLegacyMonitoredChannels($settings, $context, $context->plugin ?? null);
+
+        $channelEntries = $this->getChannelsForPlatform('twitch', $settings, $context);
+        $youTubeUrls = $this->getChannelsForPlatform('youtube', $settings, $context);
+        $kickUrls = $this->getChannelsForPlatform('kick', $settings, $context);
+        $genericUrls = $this->getChannelsForPlatform('generic', $settings, $context);
+
+        if (empty($channelEntries) && empty($youTubeUrls) && empty($kickUrls) && empty($genericUrls)) {
             return PluginActionResult::failure('No channels configured. Add at least one entry to a platform section (Twitch, YouTube, Kick or Generic).');
         }
 
@@ -432,6 +437,41 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                         }
                     } else {
                         $context->info("YouTube not live: {$ytUrl}");
+                    }
+                }
+            }
+        }
+
+        // --- Kick Live Streams ---
+        // Kick has its own loop so the kick_group setting can be honoured for
+        // grouping. The detection mechanism is identical to the generic path
+        // (streamlink --json), but the platform hint forces the right group.
+        if (! empty($kickUrls)) {
+            $streamlink = $streamlink ?? $this->findStreamlink();
+
+            if (! $streamlink) {
+                $context->warning('streamlink not found. Kick live streams cannot be checked. Install streamlink to enable Kick monitoring.');
+            } else {
+                $context->heartbeat('Checking Kick live streams…', progress: 85);
+
+                foreach ($kickUrls as $kickUrl) {
+                    $context->heartbeat("Checking Kick: {$kickUrl}…");
+                    $info = $this->checkYouTubeLiveViaStreamlink($streamlink, $kickUrl, $cookiesFile);
+
+                    if ($info) {
+                        try {
+                            $wasNew = $this->createOrUpdateGenericChannel($info, $settings, $userId, $context, 'kick');
+                            if ($wasNew) {
+                                $added++;
+                            } else {
+                                $updated++;
+                            }
+                        } catch (\Throwable $e) {
+                            $context->error("Kick {$kickUrl}: failed - {$e->getMessage()}");
+                            $errors[] = "Kick {$kickUrl}: {$e->getMessage()}";
+                        }
+                    } else {
+                        $context->info("Kick not live: {$kickUrl}");
                     }
                 }
             }
@@ -1508,7 +1548,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         PluginExecutionContext $context,
     ): bool {
         $monitoredUrl = $ytInfo['url'];
-        $group = $settings['youtube_group'] ?? 'YouTube Live';
+        $group = $this->resolveGroupForPlatform('youtube', $settings);
 
         /** @var Channel|null $existing */
         $existing = Channel::where('user_id', $userId)
@@ -1587,10 +1627,14 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
         array $settings,
         int $userId,
         PluginExecutionContext $context,
+        ?string $platformHint = null,
     ): bool {
         $monitoredUrl = $info['url'];
-        $platform = $this->detectPlatformLabel($monitoredUrl);
-        $group = $settings['streamlink_group'] ?? ($settings['youtube_group'] ?? 'Live Streams');
+        $platform = $platformHint
+            ? ucfirst($platformHint)
+            : $this->detectPlatformLabel($monitoredUrl);
+        $platformId = $platformHint ?: strtolower($this->detectPlatformLabel($monitoredUrl));
+        $group = $this->resolveGroupForPlatform($platformId, $settings);
 
         /** @var Channel|null $existing */
         $existing = Channel::where('user_id', $userId)
@@ -2228,7 +2272,10 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             return trim((string) $metadata['game']);
         }
 
-        $liveGroup = trim((string) ($settings['channel_group'] ?? ''));
+        $liveGroup = trim((string) ($settings['twitch_group'] ?? ''));
+        if ($liveGroup === '') {
+            $liveGroup = trim((string) ($settings['channel_group'] ?? ''));
+        }
 
         return $liveGroup !== '' ? $liveGroup : 'Twitch Live';
     }
@@ -2509,13 +2556,215 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     }
 
     /**
+     * Detect URL platform bucket. Returns one of:
+     *   'twitch' | 'youtube' | 'kick' | 'generic'
+     * Bare logins (no slash, no whitespace, no scheme) are treated as twitch.
+     */
+    private function detectPlatformBucket(string $line): string
+    {
+        if ($this->isYouTubeUrl($line)) {
+            return 'youtube';
+        }
+        if ($this->isTwitchUrl($line)) {
+            return 'twitch';
+        }
+        if (preg_match('#^https?://(www\.)?kick\.com/#i', $line)) {
+            return 'kick';
+        }
+        if (preg_match('#^https?://#i', $line)) {
+            return 'generic';
+        }
+        // Bare token (no scheme, no slash, no spaces) is a Twitch login.
+        if (! str_contains($line, '/') && ! preg_match('/\s/', $line)) {
+            return 'twitch';
+        }
+
+        return 'generic';
+    }
+
+    /**
+     * Auto-migrate the legacy `monitored_channels` textarea into the
+     * per-platform fields. Idempotent: a marker `__streamarr_legacy_migrated`
+     * prevents repeated work. Returns true if a migration was performed.
+     *
+     * Mutates the provided $settings array even when DB persistence fails so
+     * the same execution can use the migrated values immediately.
+     */
+    private function migrateLegacyMonitoredChannels(array &$settings, PluginExecutionContext $ctx, $plugin): bool
+    {
+        if (($settings['__streamarr_legacy_migrated'] ?? false) === true) {
+            return false;
+        }
+
+        $raw = $settings['monitored_channels'] ?? null;
+        if (! is_string($raw) || trim($raw) === '') {
+            // Nothing to migrate, but still mark so we never re-check.
+            $settings['__streamarr_legacy_migrated'] = true;
+            $this->persistSettings($plugin, $settings, $ctx);
+
+            return false;
+        }
+
+        $buckets = [
+            'twitch' => $this->splitLines((string) ($settings['twitch_channels'] ?? '')),
+            'youtube' => $this->splitLines((string) ($settings['youtube_channels'] ?? '')),
+            'kick' => $this->splitLines((string) ($settings['kick_channels'] ?? '')),
+            'generic' => $this->splitLines((string) ($settings['generic_channels'] ?? '')),
+        ];
+
+        $existsLower = [];
+        foreach ($buckets as $key => $entries) {
+            $existsLower[$key] = array_change_key_case(array_flip(array_map('strtolower', $entries)), CASE_LOWER);
+        }
+
+        $migrated = 0;
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            $bucket = $this->detectPlatformBucket($line);
+            $key = strtolower($line);
+            if (isset($existsLower[$bucket][$key])) {
+                continue;
+            }
+
+            $buckets[$bucket][] = $line;
+            $existsLower[$bucket][$key] = true;
+            $migrated++;
+        }
+
+        $settings['twitch_channels'] = implode("\n", $buckets['twitch']);
+        $settings['youtube_channels'] = implode("\n", $buckets['youtube']);
+        $settings['kick_channels'] = implode("\n", $buckets['kick']);
+        $settings['generic_channels'] = implode("\n", $buckets['generic']);
+        $settings['__streamarr_legacy_migrated'] = true;
+
+        $ctx->info("legacy migration: {$migrated} entries split into per-platform fields (twitch=".count($buckets['twitch']).", youtube=".count($buckets['youtube']).", kick=".count($buckets['kick']).", generic=".count($buckets['generic']).')');
+
+        $this->persistSettings($plugin, $settings, $ctx);
+
+        return true;
+    }
+
+    /**
+     * Best-effort persistence of the migrated settings to the plugin model.
+     * Logs a warning if the model is missing or the write fails so the in-
+     * memory copy can still be used for the current run.
+     */
+    private function persistSettings($plugin, array $settings, PluginExecutionContext $ctx): void
+    {
+        if ($plugin === null || ! is_object($plugin) || ! method_exists($plugin, 'update')) {
+            $ctx->warning('legacy migration: could not persist settings (no plugin model on context).');
+
+            return;
+        }
+
+        try {
+            $plugin->update(['settings' => $settings]);
+        } catch (\Throwable $e) {
+            $ctx->warning('legacy migration: could not persist settings: '.$e->getMessage());
+        }
+    }
+
+    /**
+     * Split a textarea value into a list of trimmed non-empty, non-comment lines.
+     *
+     * @return list<string>
+     */
+    private function splitLines(string $raw): array
+    {
+        $out = [];
+        foreach (explode("\n", $raw) as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+            $out[] = $line;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Central per-platform channel resolver.
+     *
+     * Twitch returns structured entries [['login','base_number'], ...].
+     * YouTube / Kick / Generic return a list of URLs (strings).
+     * Lines that don't match the expected platform are dropped with a warning.
+     *
+     * @return list<array{login: string, base_number: int|null}>|list<string>
+     */
+    private function getChannelsForPlatform(string $platformId, array $settings, ?PluginExecutionContext $ctx = null): array
+    {
+        $platformId = strtolower($platformId);
+        $key = $platformId.'_channels';
+        $raw = (string) ($settings[$key] ?? '');
+        if (trim($raw) === '') {
+            return [];
+        }
+
+        if ($platformId === 'twitch') {
+            return $this->parseMonitoredChannels($raw);
+        }
+
+        $out = [];
+        foreach ($this->splitLines($raw) as $line) {
+            $bucket = $this->detectPlatformBucket($line);
+            if ($bucket !== $platformId) {
+                if ($ctx) {
+                    $ctx->warning("Ignoring entry in {$key}: '{$line}' does not match platform '{$platformId}'.");
+                }
+                continue;
+            }
+
+            if ($platformId === 'youtube') {
+                $out[] = $this->normalizeYouTubeUrl($line);
+            } else {
+                $out[] = $line;
+            }
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * Resolve the group name for a platform via the chain:
+     *   {platform}_group -> channel_group -> provider default -> 'Live Streams'
+     */
+    private function resolveGroupForPlatform(string $platformId, array $settings, ?string $contextHint = null): string
+    {
+        $platformId = strtolower($platformId);
+
+        $perPlatform = trim((string) ($settings[$platformId.'_group'] ?? ''));
+        if ($perPlatform !== '') {
+            return $perPlatform;
+        }
+
+        $generic = trim((string) ($settings['channel_group'] ?? ''));
+        if ($generic !== '') {
+            return $generic;
+        }
+
+        $defaults = [
+            'twitch' => 'Twitch Live',
+            'youtube' => 'YouTube Live',
+            'kick' => 'Kick Live',
+            'generic' => 'Live Streams',
+        ];
+
+        return $defaults[$platformId] ?? 'Live Streams';
+    }
+
+    /**
      * Merge the new per-platform channel fields and the legacy
      * monitored_channels textarea into one newline-separated string so the
      * existing Twitch / YouTube / Generic parsers can keep working unchanged.
      *
-     * Order: Twitch first (the parser only matches bare logins on lines that
-     * are not URLs, so platform separation is detected by the parsers themselves
-     * via URL host matching).
+     * @deprecated since v1.11.0. handleCheckNow() now uses
+     *             getChannelsForPlatform() per platform. Kept for backward
+     *             compatibility with any out-of-tree callers.
      */
     private function buildCombinedChannelSource(array $settings): string
     {
@@ -2593,6 +2842,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
     /**
      * Parse the monitored_channels textarea and return only YouTube URLs.
      *
+     * @deprecated since v1.11.0. Use getChannelsForPlatform('youtube', ...).
+     *
      * @return list<string>
      */
     private function parseMonitoredYouTubeUrls(string $raw): array
@@ -2634,6 +2885,8 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      * handled by the generic streamlink provider (anything that isn't Twitch
      * or YouTube. Kick, Vimeo, BiliBili, Rumble, NicoNico, SOOP, DLive,
      * AfreecaTV, Mildom, etc.).
+     *
+     * @deprecated since v1.11.0. Use getChannelsForPlatform('generic', ...).
      *
      * @return list<string>
      */

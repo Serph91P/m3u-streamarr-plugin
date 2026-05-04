@@ -1777,7 +1777,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
-            'is_active' => true,
+            'enabled' => true,
             'info' => $info,
         ]);
 
@@ -1874,7 +1874,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
-            'is_active' => true,
+            'enabled' => true,
             'info' => $infoCol,
         ]);
 
@@ -1960,7 +1960,7 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             'playlist_id' => $playlistId,
             'custom_playlist_id' => $playlistId ? null : $customPlaylistId,
             'channel' => $channelNumber,
-            'is_active' => true,
+            'enabled' => true,
             'is_vod' => true,
             'info' => $infoCol,
             'logo_internal' => $vod->thumbnailUrl ?? '',

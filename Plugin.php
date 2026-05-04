@@ -1778,21 +1778,31 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
                 ->first();
         }
         if (! $existing) {
-            // Legacy / fallback path: match by monitored URL but only when
-            // there is at most one live row for that URL (otherwise we cannot
-            // tell siblings apart).
+            // Legacy / fallback path: match by monitored URL. Only adopt a
+            // candidate row when it either has no stored youtube_id (true
+            // legacy, never seen multi-live) OR its youtube_id matches the
+            // current videoId. Otherwise the row already represents a
+            // DIFFERENT concurrent broadcast for the same monitored URL and
+            // overwriting it would collapse all siblings into a single row
+            // (the original multi-live bug).
             $candidates = Channel::where('user_id', $userId)
                 ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
                 ->whereJsonContains('info->youtube_monitored_url', $monitoredUrl)
                 ->whereJsonContains('info->youtube_stream_type', self::STREAM_TYPE_LIVE)
                 ->get();
 
-            if ($candidates->count() === 1) {
-                $existing = $candidates->first();
-            } elseif ($candidates->count() > 1 && $videoId !== '') {
-                // Multiple legacy siblings: pick the one whose stored
-                // youtube_id matches, if any.
-                $existing = $candidates->first(fn ($c) => (string) data_get($c->info, 'youtube_id', '') === $videoId);
+            $adoptable = $candidates->filter(function ($c) use ($videoId) {
+                $stored = (string) data_get($c->info, 'youtube_id', '');
+
+                return $stored === '' || ($videoId !== '' && $stored === $videoId);
+            });
+
+            if ($adoptable->count() === 1) {
+                $existing = $adoptable->first();
+            } elseif ($adoptable->count() > 1 && $videoId !== '') {
+                // Prefer exact videoId match over a bare legacy row.
+                $existing = $adoptable->first(fn ($c) => (string) data_get($c->info, 'youtube_id', '') === $videoId)
+                    ?? $adoptable->first(fn ($c) => (string) data_get($c->info, 'youtube_id', '') === '');
             }
         }
 

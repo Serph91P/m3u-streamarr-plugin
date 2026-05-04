@@ -1,5 +1,47 @@
 # Changelog
 
+## [2.0.0] - 2026-05-04
+
+### Added
+- Multi-platform support via a new `PlatformProvider` abstraction. Providers
+  are discovered and dispatched through a central `ProviderRegistry`.
+- `GenericProvider` as a catch-all for any URL supported by streamlink. Covers
+  100+ tier-2 platforms including DLive, TikTok, Picarto, Soop (afreecatv),
+  Huya, Bilibili, Bigo Live, Steam Broadcast, Vimeo Events, Dailymotion,
+  Trovo, Rumble, Pluto.tv, Crunchyroll, NimoTV, Mildom, Mixcloud, Nico Nico
+  Douga, OK.ru, public broadcasters (ARD, ZDF, RTVE, RaiPlay, BBC iPlayer,
+  RTPplay, France.tv) and others.
+- `KickProvider` rewritten on the Kick API v2. Includes optional VOD
+  enumeration via `/api/v2/channels/{slug}/videos`, gated by the
+  `Include Kick VODs` toggle and `Max Kick VODs per Channel` setting.
+  Streamlink fallback is preserved when the Kick API is unreachable.
+- `YouTubeProvider` with optional Data API v3 integration plus streamlink
+  fallback. When a key is configured, `search.list` is used for channel and
+  handle URLs and `videos.list?part=liveStreamingDetails` is used for watch
+  URLs. Without a key, behaviour is byte-identical to v1.x.
+- Host-based log labels for the generic provider so multi-platform runs
+  remain readable in logs.
+- YouTube cleanup loop now uses the Data API when a key is set, with a
+  conservative streamlink confirmation before deleting a channel that was
+  created during a live session.
+- New documentation: `docs/PLATFORMS.md` (full platform matrix grouped by
+  tier) and `docs/EXCLUDED.md` (DRM-protected services that are
+  intentionally not supported).
+
+### Changed
+- Major version bump to **2.0.0** to signal Streamarr's new multi-platform
+  identity. The plugin is no longer Twitch-only.
+- `README.md` rewritten for multi-platform usage: new intro, supported
+  platforms section, channel input format reference, YouTube API setup
+  guide, and an updated settings overview.
+
+### Notes
+- Backward compatible release. No database migrations, no settings renames
+  and no `plugin.json` permission changes. All previously monitored channels
+  (Twitch, YouTube, Kick, generic) continue to work without intervention.
+- Provider behaviour without API keys is unchanged from v1.15.0; API keys
+  remain strictly optional on all platforms that have one.
+
 ## [1.15.0] - 2026-05-04
 
 ### Added

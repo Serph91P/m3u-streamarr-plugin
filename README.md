@@ -1,23 +1,40 @@
-# Streamarr. Twitch Plugin for m3u-editor
+# Streamarr. Multi-Platform Live Stream Plugin for m3u-editor
 
-Monitor Twitch channels for live streams and VODs, automatically create and remove channels in [m3u-editor](https://github.com/m3ue/m3u-editor). Streams are played through [m3u-proxy](https://github.com/m3ue/m3u-proxy)'s streamlink backend.
+Monitor 100+ streaming platforms (Twitch, YouTube, Kick, plus dozens of
+streamlink-supported tier-2 platforms) for live content and Twitch / Kick VODs.
+Streamarr automatically creates and removes channels in
+[m3u-editor](https://github.com/m3ue/m3u-editor). Streams are played through
+[m3u-proxy](https://github.com/m3ue/m3u-proxy)'s streamlink backend.
 
 ## Features
 
-- **Live stream detection**. Monitor Twitch channels and auto-create m3u-editor channels when they go live
-- **VOD support**. Optionally import recent VODs for each monitored channel
-- **Dual detection backend**. Fast batch detection via Twitch Helix API, or zero-config streamlink CLI fallback
-- **Game-based grouping**. Group live channels by their current Twitch game/category (e.g. "Just Chatting", "Fortnite")
-- **Live title & game updates**. Existing live channels are updated on each check cycle when the title or game changes
-- **Auto-cleanup**. Automatically remove channels when the stream ends
-- **Scheduled monitoring**. Configurable cron schedule for automatic checks
-- **Channel numbering**. Sequential or decimal numbering modes (same as YouTubearr)
+- **Multi-platform support**. Twitch, YouTube and Kick are first-class
+  providers. Any other platform supported by streamlink can be added through
+  the generic provider (DLive, TikTok, Picarto, Vimeo, Dailymotion, Bilibili,
+  Trovo, Rumble, Pluto.tv, public broadcasters, etc.).
+- **Provider tiers**. Tier-1 providers use native APIs (Twitch Helix, YouTube
+  Data API v3, Kick API v2) for fast batch detection and rich metadata.
+  Tier-2 platforms route through streamlink for live detection.
+- **Optional API keys**. Twitch Helix (Client ID + Secret) and YouTube Data
+  API v3 (key) are optional. Without keys, streamlink probing is used, which
+  is slower for large channel lists but requires zero credentials.
+- **VOD support**. Recent VODs for monitored Twitch and Kick channels can be
+  imported automatically.
+- **Live title and game updates**. Existing live channels are refreshed on
+  each cycle when the title or game / category changes.
+- **Auto-cleanup**. Live channels are removed when the stream ends. The
+  YouTube cleanup loop uses the Data API when a key is set, with a
+  conservative streamlink confirmation before delete.
+- **Scheduled monitoring**. Configurable cron schedule for automatic checks.
+- **Channel numbering**. Sequential or decimal numbering modes, with optional
+  Xtream-friendly bounded ranges.
 
 ## Requirements
 
 - **m3u-editor** with the plugin system enabled
 - **m3u-proxy** with streamlink support (`STREAMLINK_ENABLED=true`)
-- **Twitch API credentials** (optional but recommended). see [Setup](#twitch-api-setup)
+- **Twitch API credentials** (optional). See [Twitch API Setup](#twitch-api-setup)
+- **YouTube Data API v3 key** (optional). See [YouTube API Setup](#youtube-api-setup)
 
 ## Installation
 
@@ -30,11 +47,46 @@ Monitor Twitch channels for live streams and VODs, automatically create and remo
    ```
 3. Enable the plugin and configure settings
 
+## Supported Platforms
+
+Streamarr ships with three Tier-1 providers and a generic Tier-2 catch-all that
+routes through streamlink. Highlights:
+
+- **Tier 1**: Twitch (Helix API + streamlink), YouTube (optional Data API v3 +
+  streamlink fallback), Kick (Kick API v2 + streamlink fallback).
+- **Tier 2**: any platform with a streamlink plugin, including DLive, TikTok,
+  Picarto, Soop (afreecatv), Huya, Bilibili, Bigo Live, Steam Broadcast, Vimeo
+  Events, Dailymotion, Trovo, Rumble, Pluto.tv, public broadcasters
+  (ARD / ZDF / RTVE / RaiPlay / BBC iPlayer / RTPplay / France.tv) and many
+  more.
+
+For the full list of supported platforms see [docs/PLATFORMS.md](docs/PLATFORMS.md).
+For platforms that are intentionally not supported (mostly DRM services such
+as Disney+, Netflix, Prime Video) see [docs/EXCLUDED.md](docs/EXCLUDED.md).
+
+## Channel Input Format
+
+Each platform has its own input field in the settings. One entry per line.
+Lines starting with `#` are ignored.
+
+- **Twitch**: bare logins are accepted as a shortcut (e.g. `pokimane`).
+  Decimal numbering supported via `username=BaseNumber`. VOD URLs
+  (`https://twitch.tv/videos/<id>`) are also accepted via the manual action.
+- **YouTube**: full URL only. Channel handles
+  (`https://www.youtube.com/@Handle`), channel IDs
+  (`https://www.youtube.com/channel/UCxxxx`) and watch URLs
+  (`https://www.youtube.com/watch?v=xxxx`) are supported.
+- **Kick**: full URL only (`https://kick.com/<slug>`).
+- **Generic / Other Platforms**: full URL only. Anything streamlink recognises
+  is accepted; Streamarr derives a host-based label from the URL for logging.
+
 ## Twitch API Setup
 
-Without API credentials, Streamarr uses streamlink to check each channel individually. This works but is **slow for more than ~20 channels**. The Twitch Helix API can batch-check up to 100 channels in a single request.
+Without API credentials, Streamarr uses streamlink to check each Twitch channel
+individually. This works but is **slow for more than ~20 channels**. The Twitch
+Helix API can batch-check up to 100 channels per request.
 
-### Getting API Credentials
+### Getting Twitch API credentials
 
 1. Go to the [Twitch Developer Console](https://dev.twitch.tv/console/apps)
 2. Click **Register Your Application**
@@ -45,82 +97,133 @@ Without API credentials, Streamarr uses streamlink to check each channel individ
 4. Click **Create**
 5. Copy the **Client ID**
 6. Click **New Secret** and copy the **Client Secret**
-7. Enter both values in the Streamarr plugin settings
+7. Enter both values in the Streamarr plugin settings (Twitch section)
 
-> **Note:** The plugin uses an App Access Token (client_credentials grant). no user login or OAuth redirect flow is needed. This only accesses public data (live streams, user profiles, public VODs).
+> **Note:** The plugin uses an App Access Token (client_credentials grant). No
+> user login or OAuth redirect flow is needed. Only public data is accessed
+> (live streams, user profiles, public VODs).
 
-## Settings Reference
+## YouTube API Setup
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| Monitored Channels | textarea |. | Twitch usernames, one per line. `username` or `username=BaseNumber` for decimal numbering. `#` for comments. |
-| Stream Profile | model_select | required | Streamlink Stream Profile for proxy playback and cookies |
-| Target Playlist (Standard) | model_select |. | Standard playlist to link created channels |
-| Target Playlist (Custom) | model_select |. | Custom playlist to add created channels |
-| Group Mode | select | `static` | `static` (fixed name) or `game` (by Twitch game/category) |
-| Live Channel Group | text | `Twitch Live` | Group name in static mode / fallback for game mode |
-| VOD Group | text | `Twitch VODs` | Group name for VOD channels |
-| Stream Quality | select | `best` | Preferred quality: best, 1080p60, 720p60, 720p, 480p, 360p, 160p, audio_only |
-| Include VODs | boolean | `false` | Import recent VODs (requires Twitch API) |
-| VOD Limit | number | `5` | Max VODs per channel |
-| Auto-cleanup | boolean | `true` | Remove live channels when stream ends |
-| Starting Channel Number | number | `3000` | First channel number |
-| Channel Number Increment | number | `1` | Increment per new channel |
-| Channel Numbering Mode | select | `sequential` | `sequential` or `decimal` |
-| Twitch Client ID | text |. | Twitch API Client ID (optional) |
-| Twitch Client Secret | text |. | Twitch API Client Secret (optional) |
-| Enable Monitoring | boolean | `false` | Enable scheduled automatic checks |
-| Monitor Schedule | text | `*/10 * * * *` | Cron expression for auto-check |
+Without an API key, Streamarr probes each YouTube URL via streamlink. This
+works but is slow for large channel lists and may hit HTTP 429 rate limits
+when monitoring many channels. The YouTube Data API v3 is faster and
+rate-limit-friendly.
+
+### Getting a YouTube API key
+
+1. Open the [Google Cloud Console](https://console.cloud.google.com/)
+2. Create or select a project
+3. Open **APIs and Services > Library**, search for **YouTube Data API v3**
+   and click **Enable**
+4. Open **APIs and Services > Credentials**, click **Create Credentials > API
+   key**
+5. Copy the generated key
+6. Paste it into the Streamarr plugin setting **YouTube Data API v3 Key**
+   (YouTube section)
+
+### Quota note
+
+The default project quota is **10000 units per day**. Streamarr uses
+`search.list` for channel handle / channel-id entries, which costs **100 units
+per call**. That means roughly **100 channel checks per day** with the default
+quota. For heavier usage, either reduce the channel list, lengthen the
+monitor schedule, or request a quota increase from Google.
+
+When the quota is exhausted (HTTP 403 `quotaExceeded`) Streamarr logs one
+warning and falls back to streamlink for the rest of the run. Without a key
+the behaviour is unchanged from v1.x (everything goes through streamlink).
+
+## Settings Overview
+
+Settings are grouped into collapsible sections in the plugin UI:
+
+| Section | Purpose |
+|---------|---------|
+| Core Setup | Stream Profile (must use the Streamlink backend), target playlists. |
+| Stream and Live Defaults | Global defaults: live group name, group mode, EPG mode, title mode, quality, output format, auto-cleanup. |
+| Twitch | Twitch channels, group label, VOD options, Helix API credentials. |
+| YouTube | YouTube channel URLs, group label, optional Data API v3 key. |
+| Kick | Kick channel URLs, group label, VOD options, force-streamlink toggle. |
+| Generic / Other Platforms | Any other streamlink-supported URL, group label. |
+| Numbering and Xtream | Starting number, increment, sequential vs decimal mode, Xtream compatibility bounds, ASCII text mode. |
+| Automation | Enable scheduled monitoring, cron expression. |
 
 ## Channel Numbering
 
 ### Sequential Mode (default)
+
 Channels are numbered sequentially from the starting number:
+
 ```
-3000, 3001, 3002, 3003…
+900, 901, 902, 903 ...
 ```
 
 ### Decimal Mode
-Group streams by Twitch channel using base numbers:
+
+Group streams from the same Twitch channel using base numbers:
+
 ```
-pokimane=50   → 50.1 (live), 50.2 (VOD), 50.3 (VOD)…
-shroud=60     → 60.1 (live), 60.2 (VOD)…
+pokimane=50   -> 50.1 (live), 50.2 (VOD), 50.3 (VOD) ...
+shroud=60     -> 60.1 (live), 60.2 (VOD) ...
 ```
 
-Configure base numbers in the Monitored Channels setting: `username=BaseNumber`
+Configure base numbers in the Twitch Channels setting: `username=BaseNumber`.
 
-## Performance
+## Performance (Twitch)
 
-| Channels | With API | Without API (streamlink) |
-|----------|----------|-------------------------|
-| 1-20 | < 1 sec | ~30 sec |
-| 50 | < 1 sec | ~2 min |
-| 100 | < 2 sec | ~5 min |
-| 200+ | < 3 sec | ⚠ Very slow, API strongly recommended |
+| Channels | With Helix API | Without API (streamlink) |
+|----------|----------------|--------------------------|
+| 1-20     | < 1 sec        | ~30 sec                  |
+| 50       | < 1 sec        | ~2 min                   |
+| 100      | < 2 sec        | ~5 min                   |
+| 200+     | < 3 sec        | Very slow, API strongly recommended |
+
+YouTube Data API v3 has comparable speed when a key is configured. Tier-2
+platforms are always probed individually via streamlink.
 
 ## How It Works
 
-1. **Detection**: Checks which monitored channels are live (via Twitch API batch or streamlink per-channel)
-2. **Channel creation**: Creates m3u-editor channels with permanent Twitch URLs (`https://twitch.tv/username`)
-3. **Proxy resolution**: When a viewer connects, m3u-proxy uses streamlink to resolve the Twitch URL to a live HLS stream in real-time
-4. **Updates**: On each check cycle, live channel titles and games are updated if changed
-5. **Cleanup**: Ended streams are automatically detected and their channels removed
+1. **Detection**: Each platform's provider checks which monitored URLs are
+   live. Tier-1 providers prefer their native API, Tier-2 uses streamlink.
+2. **Channel creation**: m3u-editor channels are created with the permanent
+   platform URL (e.g. `https://twitch.tv/<login>`,
+   `https://kick.com/<slug>`).
+3. **Proxy resolution**: When a viewer connects, m3u-proxy uses streamlink to
+   resolve the URL to a live HLS stream in real time.
+4. **Updates**: On each cycle, live channel titles and games are updated if
+   they changed.
+5. **Cleanup**: Ended streams are detected and their channels removed (live
+   only; VOD channels are preserved).
 
 ## Troubleshooting
 
 ### "Failed to obtain Twitch API access token"
-- Verify your Client ID and Client Secret are correct
-- Check that the Twitch application hasn't been revoked at https://dev.twitch.tv/console/apps
+- Verify your Client ID and Client Secret are correct.
+- Check that the Twitch application has not been revoked at
+  https://dev.twitch.tv/console/apps.
 
-### Channels created but streams don't play
-- Ensure `STREAMLINK_ENABLED=true` in m3u-proxy configuration
-- Verify the Stream Profile is configured for streamlink (not yt-dlp)
-- Check m3u-proxy logs for streamlink errors
+### "YouTube Data API: quotaExceeded"
+- The 10000 daily-unit quota is exhausted. Streamarr falls back to streamlink
+  automatically for the rest of the run. Reduce the channel list, lengthen
+  the schedule, or request a quota increase.
+
+### Channels created but streams do not play
+- Ensure `STREAMLINK_ENABLED=true` in m3u-proxy configuration.
+- Verify the Stream Profile is configured for streamlink (not yt-dlp).
+- Check m3u-proxy logs for streamlink errors.
 
 ### VODs not appearing
-- VOD discovery requires Twitch API credentials
-- Enable "Include VODs" in settings
-- Some streamers disable VOD saving
+- Twitch VOD discovery requires Twitch API credentials and the
+  `Include Twitch VODs` toggle.
+- Kick VOD discovery requires the `Include Kick VODs` toggle.
+- Some streamers disable VOD saving on the platform side.
+
+### Generic platform URL is not detected
+- Run `streamlink --plugins` to verify the platform is supported by your
+  installed streamlink build.
+- Some platforms are DRM-protected and intentionally excluded; see
+  [docs/EXCLUDED.md](docs/EXCLUDED.md).
 
 ## License
 

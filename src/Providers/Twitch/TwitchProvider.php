@@ -11,7 +11,7 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
 
 /**
- * Twitch provider — Helix API when credentials are configured, otherwise
+ * Twitch provider. Helix API when credentials are configured, otherwise
  * falls back to `streamlink --json` against the channel URL (slower, no batch,
  * no metadata enrichment).
  *
@@ -28,7 +28,7 @@ use Illuminate\Support\Facades\Http;
  */
 class TwitchProvider implements PlatformProvider
 {
-    /** Hosts known to belong to other providers — never claim them as Twitch. */
+    /** Hosts known to belong to other providers. never claim them as Twitch. */
     private const FOREIGN_HOSTS = [
         'youtube.com', 'youtu.be', 'kick.com', 'rumble.com', 'dlive.tv',
         'vimeo.com', 'bilibili.com', 'nicovideo.jp', 'huya.com', 'douyu.com',
@@ -62,7 +62,7 @@ class TwitchProvider implements PlatformProvider
             return true;
         }
 
-        // Bare slug / login (no URL) — but not when it looks like a foreign host
+        // Bare slug / login (no URL). but not when it looks like a foreign host
         if (preg_match('#^https?://#i', $line)) {
             $host = strtolower((string) parse_url($line, PHP_URL_HOST));
             foreach (self::FOREIGN_HOSTS as $foreign) {
@@ -70,7 +70,7 @@ class TwitchProvider implements PlatformProvider
                     return false;
                 }
             }
-            // Unknown URL — leave for a later provider to claim.
+            // Unknown URL. leave for a later provider to claim.
             return false;
         }
 
@@ -133,7 +133,7 @@ class TwitchProvider implements PlatformProvider
     public function supportsBatchDetection(): bool
     {
         // True only when API credentials are configured. The orchestrator queries
-        // capabilities per-call via batchAvailable() — see helper below.
+        // capabilities per-call via batchAvailable(). see helper below.
         return true;
     }
 

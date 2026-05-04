@@ -16,7 +16,7 @@ use AppLocalPlugins\Streamarr\Providers\DTO\VodInfo;
  * - `id()` is the stable string used in `Channel.info->provider` and as the
  *   prefix in MonitoredEntry::key(). Lowercase, no spaces.
  * - All array-returning methods return empty arrays (never null) on no-result.
- * - Implementations MUST NOT throw on individual entry failure — they should
+ * - Implementations MUST NOT throw on individual entry failure. they should
  *   omit the entry from the result and let the orchestrator log the gap.
  */
 interface PlatformProvider
@@ -50,7 +50,7 @@ interface PlatformProvider
 
     /**
      * Detect live status for the supplied entries (all of which must belong to
-     * this provider — the orchestrator pre-groups by provider id).
+     * this provider. the orchestrator pre-groups by provider id).
      *
      * @param  MonitoredEntry[]  $entries
      * @param  array<string,mixed>  $settings  Plugin settings array.
@@ -89,7 +89,7 @@ interface PlatformProvider
 
     /**
      * URL to persist as the Channel.url. m3u-proxy / streamlink will resolve a
-     * concrete media stream from this URL on each viewer connection — so it
+     * concrete media stream from this URL on each viewer connection. so it
      * must be a permanent canonical URL (not a short-lived HLS playlist).
      */
     public function streamUrlFor(MonitoredEntry|VodInfo $target): string;

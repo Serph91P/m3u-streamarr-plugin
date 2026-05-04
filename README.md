@@ -1,23 +1,23 @@
-# Streamarr — Twitch Plugin for m3u-editor
+# Streamarr. Twitch Plugin for m3u-editor
 
 Monitor Twitch channels for live streams and VODs, automatically create and remove channels in [m3u-editor](https://github.com/m3ue/m3u-editor). Streams are played through [m3u-proxy](https://github.com/m3ue/m3u-proxy)'s streamlink backend.
 
 ## Features
 
-- **Live stream detection** — Monitor Twitch channels and auto-create m3u-editor channels when they go live
-- **VOD support** — Optionally import recent VODs for each monitored channel
-- **Dual detection backend** — Fast batch detection via Twitch Helix API, or zero-config streamlink CLI fallback
-- **Game-based grouping** — Group live channels by their current Twitch game/category (e.g. "Just Chatting", "Fortnite")
-- **Live title & game updates** — Existing live channels are updated on each check cycle when the title or game changes
-- **Auto-cleanup** — Automatically remove channels when the stream ends
-- **Scheduled monitoring** — Configurable cron schedule for automatic checks
-- **Channel numbering** — Sequential or decimal numbering modes (same as YouTubearr)
+- **Live stream detection**. Monitor Twitch channels and auto-create m3u-editor channels when they go live
+- **VOD support**. Optionally import recent VODs for each monitored channel
+- **Dual detection backend**. Fast batch detection via Twitch Helix API, or zero-config streamlink CLI fallback
+- **Game-based grouping**. Group live channels by their current Twitch game/category (e.g. "Just Chatting", "Fortnite")
+- **Live title & game updates**. Existing live channels are updated on each check cycle when the title or game changes
+- **Auto-cleanup**. Automatically remove channels when the stream ends
+- **Scheduled monitoring**. Configurable cron schedule for automatic checks
+- **Channel numbering**. Sequential or decimal numbering modes (same as YouTubearr)
 
 ## Requirements
 
 - **m3u-editor** with the plugin system enabled
 - **m3u-proxy** with streamlink support (`STREAMLINK_ENABLED=true`)
-- **Twitch API credentials** (optional but recommended) — see [Setup](#twitch-api-setup)
+- **Twitch API credentials** (optional but recommended). see [Setup](#twitch-api-setup)
 
 ## Installation
 
@@ -47,16 +47,16 @@ Without API credentials, Streamarr uses streamlink to check each channel individ
 6. Click **New Secret** and copy the **Client Secret**
 7. Enter both values in the Streamarr plugin settings
 
-> **Note:** The plugin uses an App Access Token (client_credentials grant) — no user login or OAuth redirect flow is needed. This only accesses public data (live streams, user profiles, public VODs).
+> **Note:** The plugin uses an App Access Token (client_credentials grant). no user login or OAuth redirect flow is needed. This only accesses public data (live streams, user profiles, public VODs).
 
 ## Settings Reference
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| Monitored Channels | textarea | — | Twitch usernames, one per line. `username` or `username=BaseNumber` for decimal numbering. `#` for comments. |
+| Monitored Channels | textarea |. | Twitch usernames, one per line. `username` or `username=BaseNumber` for decimal numbering. `#` for comments. |
 | Stream Profile | model_select | required | Streamlink Stream Profile for proxy playback and cookies |
-| Target Playlist (Standard) | model_select | — | Standard playlist to link created channels |
-| Target Playlist (Custom) | model_select | — | Custom playlist to add created channels |
+| Target Playlist (Standard) | model_select |. | Standard playlist to link created channels |
+| Target Playlist (Custom) | model_select |. | Custom playlist to add created channels |
 | Group Mode | select | `static` | `static` (fixed name) or `game` (by Twitch game/category) |
 | Live Channel Group | text | `Twitch Live` | Group name in static mode / fallback for game mode |
 | VOD Group | text | `Twitch VODs` | Group name for VOD channels |
@@ -67,8 +67,8 @@ Without API credentials, Streamarr uses streamlink to check each channel individ
 | Starting Channel Number | number | `3000` | First channel number |
 | Channel Number Increment | number | `1` | Increment per new channel |
 | Channel Numbering Mode | select | `sequential` | `sequential` or `decimal` |
-| Twitch Client ID | text | — | Twitch API Client ID (optional) |
-| Twitch Client Secret | text | — | Twitch API Client Secret (optional) |
+| Twitch Client ID | text |. | Twitch API Client ID (optional) |
+| Twitch Client Secret | text |. | Twitch API Client Secret (optional) |
 | Enable Monitoring | boolean | `false` | Enable scheduled automatic checks |
 | Monitor Schedule | text | `*/10 * * * *` | Cron expression for auto-check |
 
@@ -93,7 +93,7 @@ Configure base numbers in the Monitored Channels setting: `username=BaseNumber`
 
 | Channels | With API | Without API (streamlink) |
 |----------|----------|-------------------------|
-| 1–20 | < 1 sec | ~30 sec |
+| 1-20 | < 1 sec | ~30 sec |
 | 50 | < 1 sec | ~2 min |
 | 100 | < 2 sec | ~5 min |
 | 200+ | < 3 sec | ⚠ Very slow, API strongly recommended |

@@ -18,7 +18,7 @@ Work on `streamarr` as a reviewable plugin artifact for `m3u-editor`.
 - Cookies are written to temp files at the start of each action handler and cleaned up before the handler returns.
 - Dual detection: Twitch Helix API for fast batch operations when credentials configured; streamlink CLI as zero-config fallback.
 - Live dedup: one live channel per Twitch login (Twitch only allows one concurrent live stream per user).
-- VOD dedup: by `twitch_vod_id` — multiple VODs per user allowed.
+- VOD dedup: by `twitch_vod_id`. multiple VODs per user allowed.
 - Game grouping: when `group_mode=game`, channels are grouped by Twitch game/category. Group is updated on each check cycle if the game changes.
 - Title updates: existing live channels have their title, game, and thumbnail updated on each check cycle.
-- VODs are never auto-cleaned — only live-stream channels are removed when the stream ends.
+- VODs are never auto-cleaned. only live-stream channels are removed when the stream ends.

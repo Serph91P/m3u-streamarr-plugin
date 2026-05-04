@@ -12,7 +12,7 @@ use Carbon\Carbon;
 /**
  * Generic streamlink catch-all.
  *
- * Claims any http(s) URL that no earlier provider matched — meaning streamlink
+ * Claims any http(s) URL that no earlier provider matched. meaning streamlink
  * is asked to handle it. This unlocks the long-tail of platforms streamlink
  * supports out of the box: Kick, BiliBili, NicoNico, Vimeo, Rumble, AfreecaTV,
  * SOOP, DLive, Mildom, etc.
@@ -26,8 +26,8 @@ use Carbon\Carbon;
  *  - Logo: not supported (no platform-agnostic favicon strategy).
  *
  * Per-host plugin args can be set on the streamlink command line via the
- * settings key `generic_streamlink_extra_args` (one arg per line) — this is
- * where users put e.g. `--niconico-email=...`, `--bilibili-cookies=...`, etc.
+ * settings key `generic_streamlink_extra_args` (one arg per line). this is
+ * where users put e.g. `--niconico-email=.`, `--bilibili-cookies=.`, etc.
  * Cookie file (set globally on the StreamProfile) still applies.
  */
 class GenericStreamlinkProvider implements PlatformProvider

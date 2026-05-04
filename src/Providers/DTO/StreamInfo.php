@@ -33,7 +33,7 @@ class StreamInfo
         /** Provider-specific stream id (e.g. Twitch stream id, YouTube video id). */
         public readonly ?string $streamId = null,
 
-        /** Optional started_at ISO8601 — used for EPG and 'started X minutes ago' UI. */
+        /** Optional started_at ISO8601. used for EPG and 'started X minutes ago' UI. */
         public readonly ?string $startedAt = null,
 
         /** Free-form extras the orchestrator can persist into Channel.info. */

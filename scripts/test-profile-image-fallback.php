@@ -6,19 +6,19 @@ declare(strict_types=1);
  * Test script: validates that fetchProfileImageFallback() logic
  * can extract Twitch profile images without API credentials.
  *
- * Usage: php scripts/test-profile-image-fallback.php [username ...]
+ * Usage: php scripts/test-profile-image-fallback.php [username .]
  */
 
 $testLogins = array_slice($argv, 1) ?: ['nightbot', 'pokimane', 'montanablack88'];
 
-echo "Testing profile image fallback for " . count($testLogins) . " channel(s)...\n\n";
+echo "Testing profile image fallback for " . count($testLogins) . " channel(s).\n\n";
 
 $passed = 0;
 $failed = 0;
 
 foreach ($testLogins as $login) {
     $login = strtolower(trim($login));
-    echo "  [{$login}] Fetching https://www.twitch.tv/{$login} ... ";
+    echo "  [{$login}] Fetching https://www.twitch.tv/{$login} . ";
 
     $result = fetchProfileImageFallback($login);
 
@@ -77,7 +77,7 @@ function fetchProfileImageFallback(string $login): string
 
     // Best match: Twitch profile image URL (contains "profile_image" in the CDN path)
     if (preg_match('#https://static-cdn\.jtvnw\.net/jtv_user_pictures/[^"\'\s]+profile_image[^"\'\s]*#', $html, $m)) {
-        // Downsize to 70x70 — sufficient for channel logos and saves bandwidth
+        // Downsize to 70x70. sufficient for channel logos and saves bandwidth
         return preg_replace('#-\d+x\d+\.#', '-70x70.', $m[0]);
     }
 

@@ -17,6 +17,8 @@ zip -r "$ARCHIVE_PATH" . \
   -x 'dist/*' \
   -x 'tests/*' \
   -x 'scripts/*' \
+  -x '.hermes/*' \
+  -x '.gitignore' \
   -x 'README.md' \
   -x 'AGENTS.md' \
   -x 'CLAUDE.md' \

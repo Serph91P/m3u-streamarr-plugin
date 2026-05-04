@@ -3,7 +3,11 @@ name: Release Plugin
 on:
   push:
     branches: [main]
-    paths: ['Plugin.php', 'plugin.json']
+    paths:
+      - 'Plugin.php'
+      - 'plugin.json'
+      - 'src/**/*.php'
+      - 'scripts/package-plugin.sh'
   workflow_dispatch:
     inputs:
       bump:

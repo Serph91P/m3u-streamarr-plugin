@@ -36,6 +36,13 @@ class YouTubeProvider extends BaseProvider
 
     private const PER_CALL_SLEEP_USEC = 50000;
 
+    /**
+     * Hard cap on search.list pages per channel per run. With maxResults=50
+     * this covers up to 250 concurrent live broadcasts and bounds quota at
+     * 500 units per channel even on pathological inputs.
+     */
+    private const MAX_LIVE_PAGES = 5;
+
     /** @var string[] URLs that should be probed via streamlink fallback. */
     private array $pendingFallback = [];
 
@@ -362,62 +369,85 @@ class YouTubeProvider extends BaseProvider
     }
 
     /**
-     * search.list?part=snippet&channelId={id}&eventType=live&type=video  (100 units)
+     * search.list?part=snippet&channelId={id}&eventType=live&type=video  (100 units per page)
      *
-     * Returns ALL concurrently live broadcasts for the channel (up to 10).
-     * search.list cost is fixed at 100 units regardless of maxResults, so
-     * widening from 1 to 10 is free quota-wise.
+     * Returns ALL concurrently live broadcasts for the channel. Uses
+     * maxResults=50 (the API maximum) and follows nextPageToken up to a
+     * hard cap of MAX_LIVE_PAGES pages. Channels like 24/7 lofi radios
+     * routinely run 10-20 simultaneous broadcasts; the previous cap of 10
+     * silently dropped the rest.
+     *
+     * Quota note: search.list costs 100 units per page regardless of
+     * maxResults, so the per-page widening is free. Pagination only kicks
+     * in when totalResults exceeds 50, which is rare.
      *
      * @return array{0: list<array{url:string,title:string,author:string,category:string,id:string}>, 1: ?string}
      */
     private function fetchLiveSearch(string $apiKey, string $channelId, string $url): array
     {
-        try {
-            $response = Http::withHeaders([
-                'User-Agent' => self::USER_AGENT,
-                'Accept' => 'application/json',
-            ])->timeout(self::REQUEST_TIMEOUT)->get(self::API_BASE.'/search', [
+        $infos = [];
+        $seenVideoIds = [];
+        $pageToken = null;
+        $pages = 0;
+
+        do {
+            $params = [
                 'part' => 'snippet',
                 'channelId' => $channelId,
                 'eventType' => 'live',
                 'type' => 'video',
-                'maxResults' => 10,
+                'maxResults' => 50,
                 'key' => $apiKey,
-            ]);
-        } catch (\Throwable) {
-            return [[], 'other'];
-        }
-
-        $err = $this->classifyError($response);
-        if ($err !== null) {
-            return [[], $err];
-        }
-
-        $json = $response->json();
-        if (! is_array($json) || empty($json['items']) || ! is_array($json['items'])) {
-            return [[], null]; // Confirmed offline.
-        }
-
-        $infos = [];
-        foreach ($json['items'] as $item) {
-            if (! is_array($item)) {
-                continue;
-            }
-            $snippet = $item['snippet'] ?? [];
-            $vid = (string) ($item['id']['videoId'] ?? '');
-            if ($vid === '') {
-                continue;
-            }
-            $infos[] = [
-                // Point at the actual watch URL so streamlink/m3u-proxy can
-                // play this specific broadcast directly.
-                'url' => 'https://www.youtube.com/watch?v='.$vid,
-                'title' => (string) ($snippet['title'] ?? ''),
-                'author' => (string) ($snippet['channelTitle'] ?? ''),
-                'category' => '',
-                'id' => $vid,
             ];
-        }
+            if ($pageToken !== null) {
+                $params['pageToken'] = $pageToken;
+            }
+
+            try {
+                $response = Http::withHeaders([
+                    'User-Agent' => self::USER_AGENT,
+                    'Accept' => 'application/json',
+                ])->timeout(self::REQUEST_TIMEOUT)->get(self::API_BASE.'/search', $params);
+            } catch (\Throwable) {
+                return [$infos, $infos === [] ? 'other' : null];
+            }
+
+            $err = $this->classifyError($response);
+            if ($err !== null) {
+                return [$infos, $infos === [] ? $err : null];
+            }
+
+            $json = $response->json();
+            if (! is_array($json) || empty($json['items']) || ! is_array($json['items'])) {
+                // First page empty => confirmed offline. Subsequent empty
+                // page just means we have everything already.
+                return [$infos, null];
+            }
+
+            foreach ($json['items'] as $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+                $snippet = $item['snippet'] ?? [];
+                $vid = (string) ($item['id']['videoId'] ?? '');
+                if ($vid === '' || isset($seenVideoIds[$vid])) {
+                    continue;
+                }
+                $seenVideoIds[$vid] = true;
+                $infos[] = [
+                    // Point at the actual watch URL so streamlink/m3u-proxy can
+                    // play this specific broadcast directly.
+                    'url' => 'https://www.youtube.com/watch?v='.$vid,
+                    'title' => (string) ($snippet['title'] ?? ''),
+                    'author' => (string) ($snippet['channelTitle'] ?? ''),
+                    'category' => '',
+                    'id' => $vid,
+                ];
+            }
+
+            $pageToken = isset($json['nextPageToken']) ? (string) $json['nextPageToken'] : null;
+            $pages++;
+        } while ($pageToken !== null && $pages < self::MAX_LIVE_PAGES);
 
         return [$infos, null];
     }

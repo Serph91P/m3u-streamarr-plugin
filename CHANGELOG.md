@@ -10,6 +10,13 @@
   processed last). The legacy URL fallback now only adopts a candidate row
   when its stored `youtube_id` is empty (true legacy) or matches the
   current videoId, so additional siblings always create their own row.
+- YouTube multi live cap: `search.list` was called with `maxResults=10`,
+  silently dropping additional concurrent broadcasts on busy channels
+  (e.g. 24/7 lofi radios that run 10 to 20 simultaneous streams). Raised
+  to the API maximum of 50 and added `nextPageToken` pagination with a
+  hard cap of 5 pages per channel per run, so all live siblings are
+  returned. Quota is unchanged for the common case (one page = 100 units)
+  and bounded at 500 units per channel in the worst case.
 
 ## [2.2.0] - 2026-05-04
 

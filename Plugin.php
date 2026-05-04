@@ -2818,6 +2818,16 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
      */
     private function detectPlatformBucket(string $line): string
     {
+        // Bare "@Handle" shortcut for YouTube. Kept BEFORE URL checks so a
+        // stray "@" never reaches the bare-token Twitch fallback.
+        if (preg_match('/^@[A-Za-z0-9._-]{1,}$/', $line)) {
+            return 'youtube';
+        }
+        // "kick:slug" shortcut for Kick. Required because a bare slug would
+        // collide with Twitch bare logins.
+        if (preg_match('/^kick:[A-Za-z0-9._-]{1,}$/i', $line)) {
+            return 'kick';
+        }
         if ($this->isYouTubeUrl($line)) {
             return 'youtube';
         }
@@ -2996,7 +3006,19 @@ class Plugin implements ChannelProcessorPluginInterface, EpgProcessorPluginInter
             }
 
             if ($platformId === 'youtube') {
+                // Expand bare "@Handle" shortcut to a canonical channel URL so
+                // the downstream pipeline (normalizeYouTubeUrl, streamlink,
+                // YouTube Data API handle resolution) keeps working unchanged.
+                if (preg_match('/^@[A-Za-z0-9._-]{1,}$/', $line)) {
+                    $line = 'https://www.youtube.com/'.$line;
+                }
                 $out[] = $this->normalizeYouTubeUrl($line);
+            } elseif ($platformId === 'kick') {
+                // Expand "kick:slug" shortcut to a canonical channel URL.
+                if (preg_match('/^kick:([A-Za-z0-9._-]{1,})$/i', $line, $m)) {
+                    $line = 'https://kick.com/'.$m[1];
+                }
+                $out[] = $line;
             } else {
                 $out[] = $line;
             }
